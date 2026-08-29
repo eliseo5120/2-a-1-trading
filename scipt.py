@@ -36,6 +36,13 @@ MAX_OPERACIONES_ABIERTAS = 1       # Cuántas operaciones simultáneas permite e
                                     # Si es 2+, se reparten lo más parejo posible entre LONG y SHORT
                                     # (ej. con 2 -> máx 1 long y 1 short; con 3 -> máx 2 de un lado y 1 del otro).
 
+# ------------------------------------------------------------------------------
+# RANKING DE SEÑALES (se evalúan todas al final del ciclo, no la primera que aparece)
+# ------------------------------------------------------------------------------
+PESO_RATIO = 0.5             # Qué tanto pesa el ratio R:R en el score
+PESO_VOLUMEN = 0.3           # Qué tanto pesa el volumen del muro de entrada (más órdenes reales detrás)
+PESO_MOVIMIENTO_SL = 0.2     # Qué tanto pesa que el SL NO esté demasiado pegado al precio
+
 try:
     from config import BINANCE_API_KEY, BINANCE_API_SECRET  # noqa: E402
 except ImportError:
@@ -141,6 +148,45 @@ def contar_posiciones_por_lado(exchange):
         pass
 
     return longs + shorts, longs, shorts
+
+
+def _normalizar(valor, minimo, maximo):
+    """Escala 'valor' a un rango 0-1 según el mínimo/máximo del ciclo. Si todas las
+    candidatas tienen el mismo valor, no penaliza a nadie por esa métrica (da 1.0 a todas)."""
+    if maximo == minimo:
+        return 1.0
+    return (valor - minimo) / (maximo - minimo)
+
+
+def ordenar_candidatas_por_score(candidatas):
+    """
+    Recibe la lista de señales que calificaron en el ciclo y las ordena de mejor a peor
+    según un score combinado:
+      - ratio R:R              (más alto = mejor)
+      - volumen del muro de entrada (más alto = muro más sólido = mejor)
+      - % de movimiento hasta el SL (más alto = SL menos pegado al precio = mejor)
+    Cada métrica se normaliza 0-1 DENTRO del ciclo (comparando solo contra las demás
+    candidatas de esa misma ronda), y se combina con los pesos PESO_RATIO/PESO_VOLUMEN/
+    PESO_MOVIMIENTO_SL.
+    """
+    if not candidatas:
+        return []
+
+    ratios = [c['ratio'] for c in candidatas]
+    volumenes = [c['volumen_entrada'] for c in candidatas]
+    movimientos = [c['pct_movimiento_sl'] for c in candidatas]
+
+    r_min, r_max = min(ratios), max(ratios)
+    v_min, v_max = min(volumenes), max(volumenes)
+    m_min, m_max = min(movimientos), max(movimientos)
+
+    for c in candidatas:
+        score_ratio = _normalizar(c['ratio'], r_min, r_max)
+        score_volumen = _normalizar(c['volumen_entrada'], v_min, v_max)
+        score_movimiento = _normalizar(c['pct_movimiento_sl'], m_min, m_max)
+        c['score'] = (score_ratio * PESO_RATIO) + (score_volumen * PESO_VOLUMEN) + (score_movimiento * PESO_MOVIMIENTO_SL)
+
+    return sorted(candidatas, key=lambda c: c['score'], reverse=True)
 
 
 def hay_cupo_para_nueva_operacion(exchange, es_long):
@@ -401,6 +447,7 @@ def escanear_perpetuos_binance():
     while True:
         try:
             alerta_encontrada = False
+            señales_candidatas = []
             
             for symbol in pares:
                 try:
@@ -465,15 +512,19 @@ def escanear_perpetuos_binance():
                                     print(f"   💰 Capital a usar:   {calc['capital_a_usar']:,.2f} USDT (riesgo: {calc['perdida_usd']:,.2f} USDT, movimiento SL: {calc['movimiento_pct']:.2f}%)")
                                     print(f"   💰 Cantidad {base_currency}: {calc['cantidad_monedas']}")
                                     print(f"   💰 Margen necesario ({LEVERAGE}x): {calc['margen_necesario']:,.2f} USDT")
+                                    print(f"   📝 Registrada como candidata, se evalúa junto a las demás al final del ciclo.\n")
 
-                                    if tiene_posicion_u_orden_abierta(exchange, symbol):
-                                        print(f"   ⏭️  Ya hay posición/orden abierta en {symbol}, se omite esta señal.\n")
-                                    else:
-                                        cupo_ok, motivo = hay_cupo_para_nueva_operacion(exchange, es_long=True)
-                                        if not cupo_ok:
-                                            print(f"   ⏭️  Sin cupo para LONG: {motivo}.\n")
-                                        else:
-                                            ejecutar_operacion(exchange, symbol, market_info, True, compra_1, compra_2, calc)
+                                    señales_candidatas.append({
+                                        'symbol': symbol,
+                                        'market_info': market_info,
+                                        'es_long': True,
+                                        'precio_entrada': compra_1,
+                                        'precio_stop': compra_2,
+                                        'ratio': ratio_long,
+                                        'volumen_entrada': vol_c1,
+                                        'pct_movimiento_sl': pct_sl,
+                                        'calc': calc,
+                                    })
                                 else:
                                     print()
 
@@ -505,15 +556,19 @@ def escanear_perpetuos_binance():
                                     print(f"   💰 Capital a usar:   {calc['capital_a_usar']:,.2f} USDT (riesgo: {calc['perdida_usd']:,.2f} USDT, movimiento SL: {calc['movimiento_pct']:.2f}%)")
                                     print(f"   💰 Cantidad {base_currency}: {calc['cantidad_monedas']}")
                                     print(f"   💰 Margen necesario ({LEVERAGE}x): {calc['margen_necesario']:,.2f} USDT")
+                                    print(f"   📝 Registrada como candidata, se evalúa junto a las demás al final del ciclo.\n")
 
-                                    if tiene_posicion_u_orden_abierta(exchange, symbol):
-                                        print(f"   ⏭️  Ya hay posición/orden abierta en {symbol}, se omite esta señal.\n")
-                                    else:
-                                        cupo_ok, motivo = hay_cupo_para_nueva_operacion(exchange, es_long=False)
-                                        if not cupo_ok:
-                                            print(f"   ⏭️  Sin cupo para SHORT: {motivo}.\n")
-                                        else:
-                                            ejecutar_operacion(exchange, symbol, market_info, False, venta_1, venta_2, calc)
+                                    señales_candidatas.append({
+                                        'symbol': symbol,
+                                        'market_info': market_info,
+                                        'es_long': False,
+                                        'precio_entrada': venta_1,
+                                        'precio_stop': venta_2,
+                                        'ratio': ratio_short,
+                                        'volumen_entrada': vol_v1,
+                                        'pct_movimiento_sl': pct_sl_s,
+                                        'calc': calc,
+                                    })
                                 else:
                                     print()
 
@@ -527,7 +582,26 @@ def escanear_perpetuos_binance():
             hora_fin = time.strftime('%H:%M:%S')
             if not alerta_encontrada:
                 print(f"⏳ [{hora_fin}] Ciclo finalizado sin señales que superen el criterio 1:{MIN_RATIO}.")
-            
+            else:
+                candidatas_ordenadas = ordenar_candidatas_por_score(señales_candidatas)
+                print(f"\n📊 [{hora_fin}] Ciclo finalizado con {len(candidatas_ordenadas)} candidata(s), evaluando por score...")
+                for i, c in enumerate(candidatas_ordenadas, 1):
+                    lado = 'LONG' if c['es_long'] else 'SHORT'
+                    print(f"   #{i} {c['symbol']} {lado} | score={c['score']:.3f} | ratio=1:{c['ratio']:.2f} "
+                          f"| vol={c['volumen_entrada']:,.0f} | mov_sl={c['pct_movimiento_sl']:.2f}%")
+
+                    if tiene_posicion_u_orden_abierta(exchange, c['symbol']):
+                        print(f"      ⏭️  Ya hay posición/orden abierta en {c['symbol']}, se omite.")
+                        continue
+
+                    cupo_ok, motivo = hay_cupo_para_nueva_operacion(exchange, es_long=c['es_long'])
+                    if not cupo_ok:
+                        print(f"      ⏭️  Sin cupo para {lado}: {motivo}.")
+                        continue
+
+                    ejecutar_operacion(exchange, c['symbol'], c['market_info'], c['es_long'],
+                                        c['precio_entrada'], c['precio_stop'], c['calc'])
+
             print(f"😴 Descansando {MINUTOS_ESPERA_ENTRE_CICLOS} minuto(s)...\n")
             time.sleep(MINUTOS_ESPERA_ENTRE_CICLOS * 60)
 
