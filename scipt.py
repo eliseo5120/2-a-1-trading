@@ -10,15 +10,15 @@ from urllib.parse import urlencode
 # CONFIGURACIÓN GENERAL DEL BOT
 # ==============================================================================
 MIN_RATIO = 2.0                   # Ratio mínimo R:R (1:2)
-MINUTOS_ESPERA_ENTRE_CICLOS = 5  # Tiempo de descanso entre ciclos (en MINUTOS)
-PAUSA_ENTRE_PARES_SEG = 15.0      # Pausa entre pares en segundos
+MINUTOS_ESPERA_ENTRE_CICLOS = 10  # Tiempo de descanso entre ciclos (en MINUTOS)
+PAUSA_ENTRE_PARES_SEG = 0.04      # Pausa entre pares en segundos
 PAUSA_ERROR_RED_SEG = 10          # Pausa si se cae la red
 
 # ------------------------------------------------------------------------------
 # CALCULADORA DE ENTRADAS (capital / riesgo / leverage) — editable
 # ------------------------------------------------------------------------------
-CAPITAL_DISPONIBLE = 50.0        # Capital disponible en USDT
-RIESGO_PCT = 1                   # % del capital que se arriesga por operación (10 = 10%)
+CAPITAL_DISPONIBLE = 500.0        # Capital disponible en USDT
+RIESGO_PCT = 10                   # % del capital que se arriesga por operación (10 = 10%)
 LEVERAGE = 10                     # Apalancamiento (solo afecta el margen necesario)
 # ==============================================================================
 
@@ -31,6 +31,10 @@ USAR_TESTNET = True                # True = fapi Testnet (dinero de prueba). Fal
 
 ACTIVACION_TRAILING_R = 1.5        # El trailing se activa cuando el precio llega a 1.5R.
                                     # Con eso, el stop queda protegiendo exactamente el 1:1 (1R).
+
+MAX_OPERACIONES_ABIERTAS = 1       # Cuántas operaciones simultáneas permite el bot.
+                                    # Si es 2+, se reparten lo más parejo posible entre LONG y SHORT
+                                    # (ej. con 2 -> máx 1 long y 1 short; con 3 -> máx 2 de un lado y 1 del otro).
 
 try:
     from config import BINANCE_API_KEY, BINANCE_API_SECRET  # noqa: E402
@@ -107,6 +111,56 @@ def calcular_trailing_protector(precio_entrada, precio_stop, activacion_r=ACTIVA
         'callback_rate_pct': callback_rate_pct,
         'callback_rate_pct_ajustado': callback_rate_pct_ajustado,
     }
+
+
+def contar_posiciones_por_lado(exchange):
+    """
+    Recorre TODAS las posiciones abiertas de la cuenta (todos los símbolos) y devuelve
+    (total_abiertas, longs_abiertas, shorts_abiertas).
+    """
+    longs = 0
+    shorts = 0
+    try:
+        posiciones = exchange.fetch_positions()
+        for p in posiciones:
+            contratos = p.get('contracts') or 0
+            if not contratos or float(contratos) == 0:
+                continue
+            lado = p.get('side')  # ccxt unificado: 'long' o 'short'
+            if lado == 'long':
+                longs += 1
+            elif lado == 'short':
+                shorts += 1
+            else:
+                # Respaldo si el exchange no manda 'side': usar el signo de 'contracts'
+                if float(contratos) > 0:
+                    longs += 1
+                else:
+                    shorts += 1
+    except Exception:
+        pass
+
+    return longs + shorts, longs, shorts
+
+
+def hay_cupo_para_nueva_operacion(exchange, es_long):
+    """
+    Revisa si se puede abrir una operación más, respetando:
+      - el máximo total (MAX_OPERACIONES_ABIERTAS)
+      - el máximo por lado (repartido lo más parejo posible entre long y short)
+    """
+    total, longs, shorts = contar_posiciones_por_lado(exchange)
+
+    if total >= MAX_OPERACIONES_ABIERTAS:
+        return False, f"ya hay {total}/{MAX_OPERACIONES_ABIERTAS} operaciones abiertas en total"
+
+    max_por_lado = math.ceil(MAX_OPERACIONES_ABIERTAS / 2)
+    if es_long and longs >= max_por_lado:
+        return False, f"ya hay {longs}/{max_por_lado} operaciones LONG abiertas (cupo por lado)"
+    if not es_long and shorts >= max_por_lado:
+        return False, f"ya hay {shorts}/{max_por_lado} operaciones SHORT abiertas (cupo por lado)"
+
+    return True, None
 
 
 def tiene_posicion_u_orden_abierta(exchange, symbol):
@@ -415,7 +469,11 @@ def escanear_perpetuos_binance():
                                     if tiene_posicion_u_orden_abierta(exchange, symbol):
                                         print(f"   ⏭️  Ya hay posición/orden abierta en {symbol}, se omite esta señal.\n")
                                     else:
-                                        ejecutar_operacion(exchange, symbol, market_info, True, compra_1, compra_2, calc)
+                                        cupo_ok, motivo = hay_cupo_para_nueva_operacion(exchange, es_long=True)
+                                        if not cupo_ok:
+                                            print(f"   ⏭️  Sin cupo para LONG: {motivo}.\n")
+                                        else:
+                                            ejecutar_operacion(exchange, symbol, market_info, True, compra_1, compra_2, calc)
                                 else:
                                     print()
 
@@ -451,7 +509,11 @@ def escanear_perpetuos_binance():
                                     if tiene_posicion_u_orden_abierta(exchange, symbol):
                                         print(f"   ⏭️  Ya hay posición/orden abierta en {symbol}, se omite esta señal.\n")
                                     else:
-                                        ejecutar_operacion(exchange, symbol, market_info, False, venta_1, venta_2, calc)
+                                        cupo_ok, motivo = hay_cupo_para_nueva_operacion(exchange, es_long=False)
+                                        if not cupo_ok:
+                                            print(f"   ⏭️  Sin cupo para SHORT: {motivo}.\n")
+                                        else:
+                                            ejecutar_operacion(exchange, symbol, market_info, False, venta_1, venta_2, calc)
                                 else:
                                     print()
 
