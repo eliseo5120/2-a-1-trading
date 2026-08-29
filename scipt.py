@@ -25,9 +25,9 @@ LEVERAGE = 10                     # Apalancamiento (solo afecta el margen necesa
 # ------------------------------------------------------------------------------
 # EJECUCIÓN DE ÓRDENES EN BINANCE — editable
 # ------------------------------------------------------------------------------
-EJECUTAR_ORDENES_REALES = False    # ⚠️ En False = solo imprime lo que HARÍA, no manda nada.
+EJECUTAR_ORDENES_REALES = true    # ⚠️ En False = solo imprime lo que HARÍA, no manda nada.
                                     #    Ponlo en True solo cuando ya lo probaste en Testnet.
-USAR_TESTNET = True                # True = fapi Testnet (dinero de prueba). False = Binance real.
+USAR_TESTNET = false                # True = fapi Testnet (dinero de prueba). False = Binance real.
 
 ACTIVACION_TRAILING_R = 1.5        # El trailing se activa cuando el precio llega a 1.5R.
                                     # Con eso, el stop queda protegiendo exactamente el 1:1 (1R).
