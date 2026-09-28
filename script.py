@@ -25,7 +25,7 @@ LEVERAGE = 10                     # Apalancamiento (solo afecta el margen necesa
 # ------------------------------------------------------------------------------
 # EJECUCIÓN DE ÓRDENES EN BINANCE — editable
 # ------------------------------------------------------------------------------
-EJECUTAR_ORDENES_REALES = true    # ⚠️ En False = solo imprime lo que HARÍA, no manda nada.
+EJECUTAR_ORDENES_REALES = false    # ⚠️ En False = solo imprime lo que HARÍA, no manda nada.
                                     #    Ponlo en True solo cuando ya lo probaste en Testnet.
 USAR_TESTNET = false                # True = fapi Testnet (dinero de prueba). False = Binance real.
 
