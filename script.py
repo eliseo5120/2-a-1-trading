@@ -22,22 +22,22 @@ PAUSA_ERROR_RED_SEG = 10          # Pausa si se cae la red
 # ------------------------------------------------------------------------------
 # CALCULADORA DE ENTRADAS (capital / riesgo / leverage) — editable
 # ------------------------------------------------------------------------------
-CAPITAL_DISPONIBLE = 10       # Capital disponible en USDT
-RIESGO_PCT = 5                   # % del capital que se arriesga por operación (10 = 10%)
+CAPITAL_DISPONIBLE = 500.0        # Capital disponible en USDT
+RIESGO_PCT = 10                   # % del capital que se arriesga por operación (10 = 10%)
 LEVERAGE = 10                     # Apalancamiento (solo afecta el margen necesario)
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
 # EJECUCIÓN DE ÓRDENES EN BINANCE — editable
 # ------------------------------------------------------------------------------
-EJECUTAR_ORDENES_REALES = True    # ⚠️ En False = solo imprime lo que HARÍA, no manda nada.
+EJECUTAR_ORDENES_REALES = False    # ⚠️ En False = solo imprime lo que HARÍA, no manda nada.
                                     #    Ponlo en True solo cuando ya lo probaste en Testnet.
-USAR_TESTNET = False                # True = fapi Testnet (dinero de prueba). False = Binance real.
+USAR_TESTNET = True                # True = fapi Testnet (dinero de prueba). False = Binance real.
 
 ACTIVACION_TRAILING_R = 1.5        # El trailing se activa cuando el precio llega a 1.5R.
                                     # Con eso, el stop queda protegiendo exactamente el 1:1 (1R).
 
-MAX_OPERACIONES_ABIERTAS = 2       # Cuántas operaciones simultáneas permite el bot.
+MAX_OPERACIONES_ABIERTAS = 1       # Cuántas operaciones simultáneas permite el bot.
                                     # Si es 2+, se reparten lo más parejo posible entre LONG y SHORT
                                     # (ej. con 2 -> máx 1 long y 1 short; con 3 -> máx 2 de un lado y 1 del otro).
 
@@ -138,8 +138,11 @@ def calcular_trailing_protector(precio_entrada, precio_stop, activacion_r=ACTIVA
 
 def contar_posiciones_por_lado(exchange):
     """
-    Recorre TODAS las posiciones abiertas de la cuenta (todos los símbolos) y devuelve
-    (total_abiertas, longs_abiertas, shorts_abiertas).
+    Cuenta cuánto cupo está ocupado: posiciones YA abiertas (fetch_positions) MÁS
+    órdenes LIMIT de entrada de ESTE bot que todavía no se llenan (_pendientes_del_bot).
+    Sin esto, una entrada límite que aún no se ejecutó no cuenta para nada y el bot
+    seguiría mandando órdenes hasta llenar TODOS los candidatos del ciclo.
+    Devuelve (total_ocupado, longs_ocupados, shorts_ocupados).
     """
     longs = 0
     shorts = 0
@@ -160,6 +163,16 @@ def contar_posiciones_por_lado(exchange):
                     longs += 1
                 else:
                     shorts += 1
+    except Exception:
+        pass
+
+    try:
+        for o in _pendientes_del_bot(exchange):
+            lado = o.get('side')  # ccxt unificado: 'buy' o 'sell'
+            if lado == 'buy':
+                longs += 1
+            elif lado == 'sell':
+                shorts += 1
     except Exception:
         pass
 
@@ -246,13 +259,45 @@ def tiene_posicion_u_orden_abierta(exchange, symbol):
     return False
 
 
+def validar_precision_y_notional(exchange, symbol, market_info, cantidad, precio_entrada):
+    """
+    Redondea cantidad/precio a los pasos que exige el exchange (stepSize/tickSize) y valida
+    minQty y minNotional ANTES de mandar nada. Devuelve (cantidad_ok, precio_ok, error) —
+    error=None si todo pasa, o un texto explicando por qué no se puede operar ese par.
+    """
+    try:
+        cantidad_str = exchange.amount_to_precision(symbol, cantidad)
+        precio_str = exchange.price_to_precision(symbol, precio_entrada)
+        cantidad_ok = float(cantidad_str)
+        precio_ok = float(precio_str)
+    except Exception as e:
+        return None, None, f"no se pudo ajustar a la precisión del par ({e})"
+
+    limites = market_info.get('limits', {}) or {}
+    min_qty = ((limites.get('amount') or {}).get('min'))
+    min_notional = ((limites.get('cost') or {}).get('min')) or 5.0  # respaldo: mínimo típico de Binance
+    notional = cantidad_ok * precio_ok
+
+    if cantidad_ok <= 0:
+        return None, None, "la cantidad calculada redondeó a 0 con la precisión del par"
+    if min_qty and cantidad_ok < min_qty:
+        return None, None, f"cantidad {cantidad_ok} por debajo del mínimo del par ({min_qty})"
+    if min_notional and notional < min_notional:
+        return None, None, (f"el valor de la orden ({notional:.2f} USDT) está por debajo del "
+                             f"mínimo que exige Binance para este par ({min_notional} USDT) — "
+                             f"sube CAPITAL_DISPONIBLE/RIESGO_PCT o salta este par")
+
+    return cantidad_ok, precio_ok, None
+
+
 def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, precio_stop, calc):
     """
     Secuencia completa cuando salta una alerta:
       1. Fija el leverage.
-      2. Manda la orden LIMIT de entrada al precio del muro detectado.
-      3. Coloca el STOP_MARKET inicial (SL) vía /fapi/v1/algoOrder.
-      4. Coloca el TRAILING_STOP_MARKET que protege el 1:1, vía /fapi/v1/algoOrder.
+      2. Valida precisión y notional mínimo del par.
+      3. Manda la orden LIMIT de entrada al precio del muro detectado.
+      4. Coloca el STOP_MARKET inicial (SL) vía /fapi/v1/algoOrder.
+      5. Coloca el TRAILING_STOP_MARKET que protege el 1:1, vía /fapi/v1/algoOrder.
     Con EJECUTAR_ORDENES_REALES=False solo imprime lo que haría, sin mandar nada.
     """
     lado_entrada = 'buy' if es_long else 'sell'
@@ -279,19 +324,26 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
         print("   ❌ Faltan BINANCE_API_KEY / BINANCE_API_SECRET en config.py. No se puede operar.\n")
         return
 
+    cantidad_ok, precio_ok, error = validar_precision_y_notional(exchange, symbol, market_info, cantidad, precio_entrada)
+    if error:
+        print(f"   ⏭️  Se omite {symbol}: {error}.\n")
+        tg_enviar(f"⏭️ {symbol} omitido: {error}.")
+        return
+
     try:
         exchange.set_leverage(LEVERAGE, symbol)
 
         client_id = f"{PREFIJO_ORDEN}{int(time.time() * 1000)}"
-        orden_entrada = exchange.create_order(symbol, 'limit', lado_entrada, cantidad, precio_entrada,
+        orden_entrada = exchange.create_order(symbol, 'limit', lado_entrada, cantidad_ok, precio_ok,
                                               params={'clientOrderId': client_id})
         print(f"   ✅ Orden de entrada enviada. id={orden_entrada.get('id')}")
 
         _binance_signed_request('POST', '/fapi/v1/algoOrder', {
+            'algoType': 'CONDITIONAL',
             'symbol': simbolo_binance,
             'side': lado_cierre,
             'type': 'STOP_MARKET',
-            'stopPrice': f"{precio_stop:.8f}",
+            'triggerPrice': exchange.price_to_precision(symbol, precio_stop),
             'closePosition': 'true',
             'workingType': 'MARK_PRICE',
             'priceProtect': 'true',
@@ -299,18 +351,19 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
         print("   ✅ Stop Loss inicial colocado (algoOrder).")
 
         _binance_signed_request('POST', '/fapi/v1/algoOrder', {
+            'algoType': 'CONDITIONAL',
             'symbol': simbolo_binance,
             'side': lado_cierre,
             'type': 'TRAILING_STOP_MARKET',
             'closePosition': 'true',
-            'activationPrice': f"{trailing['activation_price']:.8f}",
+            'activationPrice': exchange.price_to_precision(symbol, trailing['activation_price']),
             'callbackRate': trailing['callback_rate_pct_ajustado'],
             'workingType': 'MARK_PRICE',
         }, BINANCE_API_KEY, BINANCE_API_SECRET)
         print("   ✅ Trailing Stop protector del 1:1 colocado (algoOrder).\n")
 
         tg_enviar(f"🎯 SEÑAL EJECUTADA: {symbol} {'LONG' if es_long else 'SHORT'}\n"
-                  f"Entrada LIMIT: {precio_entrada} | Cantidad: {cantidad}\n"
+                  f"Entrada LIMIT: {precio_ok} | Cantidad: {cantidad_ok}\n"
                   f"SL: {precio_stop}\n"
                   f"Trailing → activación {trailing['activation_price']:.6f} "
                   f"(callback {trailing['callback_rate_pct_ajustado']}%, protege ≈ {trailing['protegido_1_1']:.6f})")
