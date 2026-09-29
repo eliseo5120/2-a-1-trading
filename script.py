@@ -610,10 +610,13 @@ def _tg_procesar(upd):
         if _autorizado(chat_id):
             _tg_callback(cq)
         else:
+            print(f"⚠️ Botón de un chat NO autorizado: recibido={chat_id!r} vs config={TELEGRAM_CHAT_ID!r}")
             _tg_api('answerCallbackQuery', {'callback_query_id': cq['id']})
     elif 'message' in upd:
         m = upd['message']
         if not _autorizado(m['chat']['id']):
+            print(f"⚠️ Mensaje de un chat NO autorizado: recibido={m['chat']['id']!r} vs config={TELEGRAM_CHAT_ID!r} "
+                  f"(texto: {m.get('text', '')!r}). Si este ID es el tuyo, corrígelo en config.py.")
             return  # ignora a cualquiera que no sea tu chat
         texto = m.get('text', '')
         if texto.startswith('/'):
@@ -647,7 +650,8 @@ def hilo_telegram():
                     _tg_procesar(upd)
                 except Exception as e:
                     print(f"⚠️ Error procesando update de Telegram: {e}")
-        except Exception:
+        except Exception as e:
+            print(f"⚠️ Telegram: error de conexión en getUpdates ({e}). Reintentando en 5s...")
             time.sleep(5)
 
 
