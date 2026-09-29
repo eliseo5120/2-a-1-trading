@@ -22,22 +22,22 @@ PAUSA_ERROR_RED_SEG = 10          # Pausa si se cae la red
 # ------------------------------------------------------------------------------
 # CALCULADORA DE ENTRADAS (capital / riesgo / leverage) — editable
 # ------------------------------------------------------------------------------
-CAPITAL_DISPONIBLE = 500.0        # Capital disponible en USDT
-RIESGO_PCT = 10                   # % del capital que se arriesga por operación (10 = 10%)
+CAPITAL_DISPONIBLE = 10       # Capital disponible en USDT
+RIESGO_PCT = 5                   # % del capital que se arriesga por operación (10 = 10%)
 LEVERAGE = 10                     # Apalancamiento (solo afecta el margen necesario)
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
 # EJECUCIÓN DE ÓRDENES EN BINANCE — editable
 # ------------------------------------------------------------------------------
-EJECUTAR_ORDENES_REALES = False    # ⚠️ En False = solo imprime lo que HARÍA, no manda nada.
+EJECUTAR_ORDENES_REALES = True    # ⚠️ En False = solo imprime lo que HARÍA, no manda nada.
                                     #    Ponlo en True solo cuando ya lo probaste en Testnet.
-USAR_TESTNET = True                # True = fapi Testnet (dinero de prueba). False = Binance real.
+USAR_TESTNET = False                # True = fapi Testnet (dinero de prueba). False = Binance real.
 
 ACTIVACION_TRAILING_R = 1.5        # El trailing se activa cuando el precio llega a 1.5R.
                                     # Con eso, el stop queda protegiendo exactamente el 1:1 (1R).
 
-MAX_OPERACIONES_ABIERTAS = 1       # Cuántas operaciones simultáneas permite el bot.
+MAX_OPERACIONES_ABIERTAS = 2       # Cuántas operaciones simultáneas permite el bot.
                                     # Si es 2+, se reparten lo más parejo posible entre LONG y SHORT
                                     # (ej. con 2 -> máx 1 long y 1 short; con 3 -> máx 2 de un lado y 1 del otro).
 
