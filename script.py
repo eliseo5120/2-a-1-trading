@@ -40,6 +40,8 @@ ACTIVACION_TRAILING_R = 1.5        # El trailing se activa cuando el precio lleg
 MAX_OPERACIONES_ABIERTAS = 2       # Cuántas operaciones simultáneas permite el bot.
                                     # Si es 2+, se reparten lo más parejo posible entre LONG y SHORT
                                     # (ej. con 2 -> máx 1 long y 1 short; con 3 -> máx 2 de un lado y 1 del otro).
+SEGUNDOS_ESPERA_CUPO_LLENO = 30    # Con el cupo lleno, no escanea: solo revisa cada tantos segundos
+                                    # si se liberó un cupo (se cerró una operación) para retomar el escaneo.
 
 # ------------------------------------------------------------------------------
 # RANKING DE SEÑALES (se evalúan todas al final del ciclo, no la primera que aparece)
@@ -439,6 +441,7 @@ AJUSTES_EDITABLES = {
     'RIESGO_PCT': (float, 0.1, 50, "% del capital que se arriesga por operación"),
     'LEVERAGE': (int, 1, 125, "Apalancamiento"),
     'MAX_OPERACIONES_ABIERTAS': (int, 1, 20, "Operaciones simultáneas máximas"),
+    'SEGUNDOS_ESPERA_CUPO_LLENO': (float, 5, 3600, "Segundos entre revisiones cuando el cupo está lleno"),
     'MIN_RATIO': (float, 0.5, 100, "Ratio R:R mínimo (2 = 1:2)"),
     'ACTIVACION_TRAILING_R': (float, 1.05, 10, "Activación del trailing en múltiplos de R"),
     'MINUTOS_ESPERA_ENTRE_CICLOS': (float, 0.5, 1440, "Minutos de descanso entre ciclos"),
@@ -1163,6 +1166,16 @@ def escanear_perpetuos_binance():
     
     while True:
         try:
+            # Primero se revisa el cupo: si ya está lleno, no tiene sentido escanear 400+
+            # pares para nada — solo se espera, en intervalos cortos, a que el hilo monitor
+            # detecte que algo se cerró y libere espacio.
+            total_ocupado, long_ocupado, short_ocupado = contar_posiciones_por_lado(exchange)
+            if total_ocupado >= MAX_OPERACIONES_ABIERTAS:
+                print(f"🟡 [{time.strftime('%H:%M:%S')}] Cupo lleno ({total_ocupado}/{MAX_OPERACIONES_ABIERTAS}). "
+                      f"En espera, gestionando operaciones abiertas... (revisa en {SEGUNDOS_ESPERA_CUPO_LLENO:g}s)")
+                time.sleep(SEGUNDOS_ESPERA_CUPO_LLENO)
+                continue
+
             alerta_encontrada = False
             señales_candidatas = []
             
