@@ -22,22 +22,22 @@ PAUSA_ERROR_RED_SEG = 10          # Pausa si se cae la red
 # ------------------------------------------------------------------------------
 # CALCULADORA DE ENTRADAS (capital / riesgo / leverage) — editable
 # ------------------------------------------------------------------------------
-CAPITAL_DISPONIBLE = 10        # Capital disponible en USDT
-RIESGO_PCT = 1                   # % del capital que se arriesga por operación (10 = 10%)
+CAPITAL_DISPONIBLE = 500.0        # Capital disponible en USDT
+RIESGO_PCT = 10                   # % del capital que se arriesga por operación (10 = 10%)
 LEVERAGE = 10                     # Apalancamiento (solo afecta el margen necesario)
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
 # EJECUCIÓN DE ÓRDENES EN BINANCE — editable
 # ------------------------------------------------------------------------------
-EJECUTAR_ORDENES_REALES = True    # ⚠️ En False = solo imprime lo que HARÍA, no manda nada.
+EJECUTAR_ORDENES_REALES = False    # ⚠️ En False = solo imprime lo que HARÍA, no manda nada.
                                     #    Ponlo en True solo cuando ya lo probaste en Testnet.
-USAR_TESTNET = False                # True = fapi Testnet (dinero de prueba). False = Binance real.
+USAR_TESTNET = True                # True = fapi Testnet (dinero de prueba). False = Binance real.
 
 ACTIVACION_TRAILING_R = 1.5        # El trailing se activa cuando el precio llega a 1.5R.
                                     # Con eso, el stop queda protegiendo exactamente el 1:1 (1R).
 
-MAX_OPERACIONES_ABIERTAS = 2       # Cuántas operaciones simultáneas permite el bot.
+MAX_OPERACIONES_ABIERTAS = 1       # Cuántas operaciones simultáneas permite el bot.
                                     # Si es 2+, se reparten lo más parejo posible entre LONG y SHORT
                                     # (ej. con 2 -> máx 1 long y 1 short; con 3 -> máx 2 de un lado y 1 del otro).
 
@@ -218,22 +218,22 @@ def ordenar_candidatas_por_score(candidatas):
     return sorted(candidatas, key=lambda c: c['score'], reverse=True)
 
 
-def hay_cupo_para_nueva_operacion(exchange, es_long):
+def hay_cupo(total_ocupado, long_ocupado, short_ocupado, es_long):
     """
-    Revisa si se puede abrir una operación más, respetando:
-      - el máximo total (MAX_OPERACIONES_ABIERTAS)
-      - el máximo por lado (repartido lo más parejo posible entre long y short)
+    Evalúa el cupo usando CONTADORES YA CALCULADOS (no vuelve a preguntarle al exchange).
+    Esto es a propósito: consultar el exchange una vez por candidata es lento, se puede topar
+    con límites de rate-limit, y si esa consulta falla en silencio el cupo deja de respetarse
+    (exactamente el bug que mandó de más operaciones). Contando en memoria, local al ciclo,
+    el tope de MAX_OPERACIONES_ABIERTAS se respeta pase lo que pase con la red.
     """
-    total, longs, shorts = contar_posiciones_por_lado(exchange)
-
-    if total >= MAX_OPERACIONES_ABIERTAS:
-        return False, f"ya hay {total}/{MAX_OPERACIONES_ABIERTAS} operaciones abiertas en total"
+    if total_ocupado >= MAX_OPERACIONES_ABIERTAS:
+        return False, f"cupo total lleno ({total_ocupado}/{MAX_OPERACIONES_ABIERTAS})"
 
     max_por_lado = math.ceil(MAX_OPERACIONES_ABIERTAS / 2)
-    if es_long and longs >= max_por_lado:
-        return False, f"ya hay {longs}/{max_por_lado} operaciones LONG abiertas (cupo por lado)"
-    if not es_long and shorts >= max_por_lado:
-        return False, f"ya hay {shorts}/{max_por_lado} operaciones SHORT abiertas (cupo por lado)"
+    ocupado_lado = long_ocupado if es_long else short_ocupado
+    if ocupado_lado >= max_por_lado:
+        lado_txt = 'LONG' if es_long else 'SHORT'
+        return False, f"cupo de {lado_txt} lleno ({ocupado_lado}/{max_por_lado})"
 
     return True, None
 
@@ -290,15 +290,25 @@ def validar_precision_y_notional(exchange, symbol, market_info, cantidad, precio
     return cantidad_ok, precio_ok, None
 
 
+PROTECCION_PENDIENTE = {}   # symbol -> datos del SL/trailing a colocar en cuanto exista la posición
+_lock_proteccion = threading.Lock()
+
+
 def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, precio_stop, calc):
     """
-    Secuencia completa cuando salta una alerta:
-      1. Fija el leverage.
-      2. Valida precisión y notional mínimo del par.
+    Secuencia cuando salta una alerta:
+      1. Valida precisión y notional mínimo del par (sin gastar cupo si no pasa).
+      2. Fija el leverage.
       3. Manda la orden LIMIT de entrada al precio del muro detectado.
-      4. Coloca el STOP_MARKET inicial (SL) vía /fapi/v1/algoOrder.
-      5. Coloca el TRAILING_STOP_MARKET que protege el 1:1, vía /fapi/v1/algoOrder.
+      4. Guarda el SL/Trailing calculados como "pendientes" — el hilo monitor los coloca
+         en cuanto detecta que la posición realmente existe (Binance exige que la posición
+         ya esté abierta para aceptar una orden condicional con closePosition=true; mandarla
+         antes de que la entrada se llene da el error -4509/TIF GTE).
     Con EJECUTAR_ORDENES_REALES=False solo imprime lo que haría, sin mandar nada.
+
+    Devuelve True si la operación se ejecutó (o se habría ejecutado, en modo simulado) y por
+    lo tanto debe contar para el cupo de MAX_OPERACIONES_ABIERTAS; False si se omitió y el
+    cupo sigue disponible para la siguiente candidata.
     """
     lado_entrada = 'buy' if es_long else 'sell'
     lado_cierre = 'SELL' if es_long else 'BUY'
@@ -308,69 +318,106 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
     trailing = calcular_trailing_protector(precio_entrada, precio_stop)
     if not trailing:
         print("   ⚠️  No se pudo calcular el trailing (precio de entrada = stop). Se omite la operación.")
-        return
+        return False
+
+    try:
+        cantidad_ok, precio_ok, error = validar_precision_y_notional(exchange, symbol, market_info, cantidad, precio_entrada)
+    except Exception as e:
+        cantidad_ok, precio_ok, error = None, None, f"no se pudo validar contra el exchange ({e})"
 
     print(f"   🤖 Plan de ejecución: LIMIT {lado_entrada.upper()} {cantidad} {market_info['base']} @ {precio_entrada}")
-    print(f"   🤖 SL inicial (STOP_MARKET closePosition): {precio_stop}")
+    print(f"   🤖 SL (se arma cuando la posición exista): {precio_stop}")
     print(f"   🤖 Trailing protector 1:1 → activación {trailing['activation_price']:.8f} "
           f"| callback {trailing['callback_rate_pct_ajustado']}% "
           f"(protege ≈ {trailing['protegido_1_1']:.8f})")
 
+    if error:
+        # Se omite en silencio hacia Telegram a propósito: el usuario solo quiere avisos de
+        # operaciones BUENAS que sí se mandan a Binance, no de cada candidata descartada.
+        print(f"   ⏭️  Se omite {symbol}: {error}.\n")
+        return False
+
     if not EJECUTAR_ORDENES_REALES:
-        print("   🔒 EJECUTAR_ORDENES_REALES=False → no se mandó ninguna orden real.\n")
-        return
+        print("   🔒 EJECUTAR_ORDENES_REALES=False → no se mandó ninguna orden real "
+              "(cuenta como ejecutada para que la simulación de cupo sea realista).\n")
+        return True
 
     if not BINANCE_API_KEY or not BINANCE_API_SECRET:
         print("   ❌ Faltan BINANCE_API_KEY / BINANCE_API_SECRET en config.py. No se puede operar.\n")
-        return
-
-    cantidad_ok, precio_ok, error = validar_precision_y_notional(exchange, symbol, market_info, cantidad, precio_entrada)
-    if error:
-        print(f"   ⏭️  Se omite {symbol}: {error}.\n")
-        tg_enviar(f"⏭️ {symbol} omitido: {error}.")
-        return
+        return False
 
     try:
         exchange.set_leverage(LEVERAGE, symbol)
-
         client_id = f"{PREFIJO_ORDEN}{int(time.time() * 1000)}"
         orden_entrada = exchange.create_order(symbol, 'limit', lado_entrada, cantidad_ok, precio_ok,
                                               params={'clientOrderId': client_id})
         print(f"   ✅ Orden de entrada enviada. id={orden_entrada.get('id')}")
+    except Exception as e:
+        print(f"   ❌ Error mandando la orden de entrada: {e}\n")
+        tg_enviar(f"❌ ERROR mandando entrada en {symbol}: {e}")
+        return False
 
+    # Ya hay una orden real puesta -> cuenta para el cupo pase lo que pase de aquí en más.
+    with _lock_proteccion:
+        PROTECCION_PENDIENTE[symbol] = {
+            'simbolo_binance': simbolo_binance,
+            'lado_cierre': lado_cierre,
+            'precio_stop': precio_stop,
+            'activation_price': trailing['activation_price'],
+            'callback_rate': trailing['callback_rate_pct_ajustado'],
+            'protegido_1_1': trailing['protegido_1_1'],
+        }
+    print(f"   ⏳ SL/Trailing quedaron pendientes: se colocan automáticamente en cuanto la entrada se llene.\n")
+    tg_enviar(f"📥 ENTRADA ENVIADA: {symbol} {'LONG' if es_long else 'SHORT'}\n"
+              f"LIMIT: {precio_ok} | Cantidad: {cantidad_ok}\n"
+              f"SL/Trailing se arman solos en cuanto se llene la entrada.")
+
+    return True
+
+
+def colocar_proteccion_pendiente(exchange, symbol):
+    """
+    Se llama desde hilo_monitor apenas detecta que una posición nueva apareció. Si esa
+    posición corresponde a una entrada que mandamos nosotros (está en PROTECCION_PENDIENTE),
+    coloca ahora sí el STOP_MARKET y el TRAILING_STOP_MARKET (ya se puede: la posición existe).
+    """
+    with _lock_proteccion:
+        info = PROTECCION_PENDIENTE.pop(symbol, None)
+    if not info:
+        return  # posición que no abrió este bot (o ya se le colocó protección antes)
+
+    try:
         _binance_signed_request('POST', '/fapi/v1/algoOrder', {
             'algoType': 'CONDITIONAL',
-            'symbol': simbolo_binance,
-            'side': lado_cierre,
+            'symbol': info['simbolo_binance'],
+            'side': info['lado_cierre'],
             'type': 'STOP_MARKET',
-            'triggerPrice': exchange.price_to_precision(symbol, precio_stop),
+            'triggerPrice': exchange.price_to_precision(symbol, info['precio_stop']),
             'closePosition': 'true',
             'workingType': 'MARK_PRICE',
             'priceProtect': 'true',
         }, BINANCE_API_KEY, BINANCE_API_SECRET)
-        print("   ✅ Stop Loss inicial colocado (algoOrder).")
 
         _binance_signed_request('POST', '/fapi/v1/algoOrder', {
             'algoType': 'CONDITIONAL',
-            'symbol': simbolo_binance,
-            'side': lado_cierre,
+            'symbol': info['simbolo_binance'],
+            'side': info['lado_cierre'],
             'type': 'TRAILING_STOP_MARKET',
             'closePosition': 'true',
-            'activationPrice': exchange.price_to_precision(symbol, trailing['activation_price']),
-            'callbackRate': trailing['callback_rate_pct_ajustado'],
+            'activationPrice': exchange.price_to_precision(symbol, info['activation_price']),
+            'callbackRate': info['callback_rate'],
             'workingType': 'MARK_PRICE',
         }, BINANCE_API_KEY, BINANCE_API_SECRET)
-        print("   ✅ Trailing Stop protector del 1:1 colocado (algoOrder).\n")
 
-        tg_enviar(f"🎯 SEÑAL EJECUTADA: {symbol} {'LONG' if es_long else 'SHORT'}\n"
-                  f"Entrada LIMIT: {precio_ok} | Cantidad: {cantidad_ok}\n"
-                  f"SL: {precio_stop}\n"
-                  f"Trailing → activación {trailing['activation_price']:.6f} "
-                  f"(callback {trailing['callback_rate_pct_ajustado']}%, protege ≈ {trailing['protegido_1_1']:.6f})")
-
+        print(f"   ✅ SL/Trailing colocados para {symbol} (posición confirmada).")
+        tg_enviar(f"🎯 PROTECCIÓN ARMADA: {symbol}\n"
+                  f"SL: {info['precio_stop']}\n"
+                  f"Trailing → activación {info['activation_price']:.6f} "
+                  f"(callback {info['callback_rate']}%, protege ≈ {info['protegido_1_1']:.6f})")
     except Exception as e:
-        print(f"   ❌ Error ejecutando la operación en Binance: {e}\n")
-        tg_enviar(f"❌ ERROR ejecutando {symbol}: {e}")
+        print(f"   ⚠️  {symbol}: posición abierta PERO falló el SL/Trailing: {e}")
+        tg_enviar(f"🚨 URGENTE: {symbol} tiene una posición abierta SIN protección "
+                  f"(falló SL/trailing: {e}). Revisa manualmente en Binance.")
 
 
 # ==============================================================================
@@ -686,17 +733,30 @@ def hilo_telegram():
     if r and r.get('result'):
         offset = r['result'][-1]['update_id'] + 1
 
+    aviso_409_mostrado = False
+
     while True:
         try:
-            payload = {'timeout': 25, 'allowed_updates': ['message', 'callback_query']}
+            payload = {'timeout': 20, 'allowed_updates': ['message', 'callback_query']}
             if offset:
                 payload['offset'] = offset
             resp = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates",
-                                 json=payload, timeout=35).json()
+                                 json=payload, timeout=30).json()
             if not resp.get('ok'):
-                print(f"⚠️ Telegram getUpdates: {resp}")
-                time.sleep(10)
+                if resp.get('error_code') == 409:
+                    # Normal al reiniciar el script: Telegram aún no soltó la conexión anterior.
+                    # Se resuelve solo en unos segundos; solo avisamos UNA vez, no en cada intento.
+                    if not aviso_409_mostrado:
+                        print("⚠️ Telegram: liberando la conexión de la corrida anterior (normal al "
+                              "reiniciar), reintentando en silencio...")
+                        aviso_409_mostrado = True
+                else:
+                    print(f"⚠️ Telegram getUpdates: {resp}")
+                time.sleep(3)
                 continue
+            if aviso_409_mostrado:
+                print("✅ Telegram: conexión recuperada, ya está escuchando comandos normal.")
+                aviso_409_mostrado = False
             for upd in resp.get('result', []):
                 offset = upd['update_id'] + 1
                 try:
@@ -889,6 +949,8 @@ def hilo_monitor(exchange):
                     cabecera = "📌 POSICIÓN DETECTADA AL INICIAR" if primera else "🟢 OPERACIÓN ABIERTA"
                     tg_enviar(f"{cabecera}\n{sym} {str(p['lado']).upper()}\n"
                               f"Contratos: {p['contratos']:g} | Entrada: {p['entrada']}")
+                    if EJECUTAR_ORDENES_REALES:
+                        colocar_proteccion_pendiente(exchange, sym)
 
             for sym in list(conocidas):
                 if sym not in actuales:
@@ -916,6 +978,8 @@ def hilo_monitor(exchange):
                         if edad_min >= MINUTOS_MAX_ORDEN_PENDIENTE and o['symbol'] not in actuales:
                             exchange.cancel_order(o['id'], o['symbol'])
                             limpiar_ordenes_simbolo(exchange, o['symbol'], exchange.market(o['symbol'])['id'])
+                            with _lock_proteccion:
+                                PROTECCION_PENDIENTE.pop(o['symbol'], None)
                             pendientes.remove(o)
                             tg_enviar(f"⌛ ORDEN CANCELADA\n{o['symbol']} {str(o['side']).upper()} @ {o['price']}\n"
                                       f"No se llenó en {MINUTOS_MAX_ORDEN_PENDIENTE:g} min; se canceló junto a su SL/trailing.")
@@ -1238,22 +1302,39 @@ def escanear_perpetuos_binance():
             else:
                 candidatas_ordenadas = ordenar_candidatas_por_score(señales_candidatas)
                 print(f"\n📊 [{hora_fin}] Ciclo finalizado con {len(candidatas_ordenadas)} candidata(s), evaluando por score...")
+
+                # Se consulta el cupo real UNA sola vez al inicio del ciclo, y de ahí en
+                # adelante se lleva la cuenta EN MEMORIA. No se vuelve a preguntar al exchange
+                # por cada candidata: si esa consulta fallara en silencio (red, rate-limit),
+                # el cupo dejaría de respetarse — que fue justo el bug que mandó de más.
+                total_ocupado, long_ocupado, short_ocupado = contar_posiciones_por_lado(exchange)
+                ejecutadas = 0
+
                 for i, c in enumerate(candidatas_ordenadas, 1):
                     lado = 'LONG' if c['es_long'] else 'SHORT'
                     print(f"   #{i} {c['symbol']} {lado} | score={c['score']:.3f} | ratio=1:{c['ratio']:.2f} "
                           f"| vol={c['volumen_entrada']:,.0f} | mov_sl={c['pct_movimiento_sl']:.2f}%")
 
+                    cupo_ok, motivo = hay_cupo(total_ocupado, long_ocupado, short_ocupado, c['es_long'])
+                    if not cupo_ok:
+                        print(f"      ⏭️  Sin cupo para {lado}: {motivo}. Se detiene la evaluación de este ciclo.")
+                        break  # ya no tiene sentido seguir revisando el resto de candidatas
+
                     if tiene_posicion_u_orden_abierta(exchange, c['symbol']):
                         print(f"      ⏭️  Ya hay posición/orden abierta en {c['symbol']}, se omite.")
                         continue
 
-                    cupo_ok, motivo = hay_cupo_para_nueva_operacion(exchange, es_long=c['es_long'])
-                    if not cupo_ok:
-                        print(f"      ⏭️  Sin cupo para {lado}: {motivo}.")
-                        continue
+                    if ejecutar_operacion(exchange, c['symbol'], c['market_info'], c['es_long'],
+                                          c['precio_entrada'], c['precio_stop'], c['calc']):
+                        total_ocupado += 1
+                        ejecutadas += 1
+                        if c['es_long']:
+                            long_ocupado += 1
+                        else:
+                            short_ocupado += 1
 
-                    ejecutar_operacion(exchange, c['symbol'], c['market_info'], c['es_long'],
-                                        c['precio_entrada'], c['precio_stop'], c['calc'])
+                print(f"   ✅ {ejecutadas} operación(es) ejecutada(s) este ciclo "
+                      f"(cupo: {total_ocupado}/{MAX_OPERACIONES_ABIERTAS}).")
 
             print(f"😴 Descansando {MINUTOS_ESPERA_ENTRE_CICLOS} minuto(s)...\n")
             time.sleep(MINUTOS_ESPERA_ENTRE_CICLOS * 60)
