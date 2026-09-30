@@ -15,15 +15,14 @@ from zoneinfo import ZoneInfo
 # CONFIGURACIÓN GENERAL DEL BOT
 # ==============================================================================
 MIN_RATIO = 2.0                   # Ratio mínimo R:R (1:2)
-MINUTOS_ESPERA_ENTRE_CICLOS = 10  # Tiempo de descanso entre ciclos (en MINUTOS)
 PAUSA_ENTRE_PARES_SEG = 0.04      # Pausa entre pares en segundos
 PAUSA_ERROR_RED_SEG = 10          # Pausa si se cae la red
 
 # ------------------------------------------------------------------------------
 # CALCULADORA DE ENTRADAS (capital / riesgo / leverage) — editable
 # ------------------------------------------------------------------------------
-CAPITAL_DISPONIBLE = 10        # Capital disponible en USDT
-RIESGO_PCT = 10                   # % del capital que se arriesga por operación (10 = 10%)
+CAPITAL_DISPONIBLE = 20        # Capital disponible en USDT
+RIESGO_PCT = 5                   # % del capital que se arriesga por operación (10 = 10%)
 LEVERAGE = 10                     # Apalancamiento (solo afecta el margen necesario)
 # ==============================================================================
 
@@ -144,10 +143,17 @@ def contar_posiciones_por_lado(exchange):
     órdenes LIMIT de entrada de ESTE bot que todavía no se llenan (_pendientes_del_bot).
     Sin esto, una entrada límite que aún no se ejecutó no cuenta para nada y el bot
     seguiría mandando órdenes hasta llenar TODOS los candidatos del ciclo.
-    Devuelve (total_ocupado, longs_ocupados, shorts_ocupados).
+
+    Devuelve (ok, total_ocupado, longs_ocupados, shorts_ocupados).
+    ok=False significa que NO se pudo verificar el cupo con confianza (falló la consulta
+    al exchange) — quien llama a esta función DEBE tratar ok=False como "cupo lleno",
+    nunca como "cupo vacío". Devolver 0 en silencio ante un error fue exactamente el bug
+    que dejó pasar 6 órdenes reales con MAX_OPERACIONES_ABIERTAS=2.
     """
     longs = 0
     shorts = 0
+    ok = True
+
     try:
         posiciones = exchange.fetch_positions()
         for p in posiciones:
@@ -165,8 +171,9 @@ def contar_posiciones_por_lado(exchange):
                     longs += 1
                 else:
                     shorts += 1
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"⚠️ No se pudo consultar fetch_positions() para el cupo ({e}). Por seguridad, se asume cupo LLENO.")
+        ok = False
 
     try:
         for o in _pendientes_del_bot(exchange):
@@ -175,10 +182,11 @@ def contar_posiciones_por_lado(exchange):
                 longs += 1
             elif lado == 'sell':
                 shorts += 1
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"⚠️ No se pudo consultar las órdenes pendientes para el cupo ({e}). Por seguridad, se asume cupo LLENO.")
+        ok = False
 
-    return longs + shorts, longs, shorts
+    return ok, longs + shorts, longs, shorts
 
 
 def _normalizar(valor, minimo, maximo):
@@ -241,22 +249,27 @@ def hay_cupo(total_ocupado, long_ocupado, short_ocupado, es_long):
 
 
 def tiene_posicion_u_orden_abierta(exchange, symbol):
-    """True si ya hay posición abierta o alguna orden viva en ese símbolo (evita duplicar)."""
+    """
+    True si ya hay posición abierta, alguna orden viva en ese símbolo, o si no se pudo
+    verificar con confianza (fail-safe: ante la duda, se omite en vez de arriesgarse a duplicar).
+    """
     try:
         posiciones = exchange.fetch_positions([symbol])
         for p in posiciones:
             contratos = p.get('contracts') or 0
             if contratos and float(contratos) != 0:
                 return True
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"⚠️ No se pudo verificar posición en {symbol} ({e}). Por seguridad, se omite esta candidata.")
+        return True
 
     try:
         ordenes = exchange.fetch_open_orders(symbol)
         if ordenes:
             return True
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"⚠️ No se pudo verificar órdenes abiertas en {symbol} ({e}). Por seguridad, se omite esta candidata.")
+        return True
 
     return False
 
@@ -444,7 +457,6 @@ AJUSTES_EDITABLES = {
     'SEGUNDOS_ESPERA_CUPO_LLENO': (float, 5, 3600, "Segundos entre revisiones cuando el cupo está lleno"),
     'MIN_RATIO': (float, 0.5, 100, "Ratio R:R mínimo (2 = 1:2)"),
     'ACTIVACION_TRAILING_R': (float, 1.05, 10, "Activación del trailing en múltiplos de R"),
-    'MINUTOS_ESPERA_ENTRE_CICLOS': (float, 0.5, 1440, "Minutos de descanso entre ciclos"),
     'MINUTOS_MAX_ORDEN_PENDIENTE': (float, 0, 1440, "Minutos antes de cancelar una orden límite sin llenar (0 = nunca)"),
     'PAUSA_ENTRE_PARES_SEG': (float, 0, 10, "Pausa entre pares (seg)"),
     'PAUSA_ERROR_RED_SEG': (float, 1, 300, "Pausa tras error de red (seg)"),
@@ -457,7 +469,7 @@ AJUSTES_EDITABLES = {
 ALIAS_AJUSTES = {
     'capital': 'CAPITAL_DISPONIBLE', 'riesgo': 'RIESGO_PCT', 'leverage': 'LEVERAGE',
     'apalancamiento': 'LEVERAGE', 'operaciones': 'MAX_OPERACIONES_ABIERTAS',
-    'ratio': 'MIN_RATIO', 'trailing': 'ACTIVACION_TRAILING_R', 'ciclo': 'MINUTOS_ESPERA_ENTRE_CICLOS',
+    'ratio': 'MIN_RATIO', 'trailing': 'ACTIVACION_TRAILING_R',
     'pendiente': 'MINUTOS_MAX_ORDEN_PENDIENTE', 'ejecutar': 'EJECUTAR_ORDENES_REALES',
 }
 
@@ -1166,10 +1178,15 @@ def escanear_perpetuos_binance():
     
     while True:
         try:
-            # Primero se revisa el cupo: si ya está lleno, no tiene sentido escanear 400+
-            # pares para nada — solo se espera, en intervalos cortos, a que el hilo monitor
-            # detecte que algo se cerró y libere espacio.
-            total_ocupado, long_ocupado, short_ocupado = contar_posiciones_por_lado(exchange)
+            # Primero se revisa el cupo: si ya está lleno (o no se pudo verificar con
+            # confianza), no tiene sentido escanear 400+ pares para nada — solo se espera,
+            # en intervalos cortos, a que el hilo monitor detecte que algo se cerró.
+            cupo_verificado, total_ocupado, long_ocupado, short_ocupado = contar_posiciones_por_lado(exchange)
+            if not cupo_verificado:
+                print(f"🟡 [{time.strftime('%H:%M:%S')}] No se pudo verificar el cupo con seguridad. "
+                      f"Se espera {SEGUNDOS_ESPERA_CUPO_LLENO:g}s y se reintenta (nunca se asume cupo vacío).")
+                time.sleep(SEGUNDOS_ESPERA_CUPO_LLENO)
+                continue
             if total_ocupado >= MAX_OPERACIONES_ABIERTAS:
                 print(f"🟡 [{time.strftime('%H:%M:%S')}] Cupo lleno ({total_ocupado}/{MAX_OPERACIONES_ABIERTAS}). "
                       f"En espera, gestionando operaciones abiertas... (revisa en {SEGUNDOS_ESPERA_CUPO_LLENO:g}s)")
@@ -1316,41 +1333,48 @@ def escanear_perpetuos_binance():
                 candidatas_ordenadas = ordenar_candidatas_por_score(señales_candidatas)
                 print(f"\n📊 [{hora_fin}] Ciclo finalizado con {len(candidatas_ordenadas)} candidata(s), evaluando por score...")
 
-                # Se consulta el cupo real UNA sola vez al inicio del ciclo, y de ahí en
-                # adelante se lleva la cuenta EN MEMORIA. No se vuelve a preguntar al exchange
-                # por cada candidata: si esa consulta fallara en silencio (red, rate-limit),
-                # el cupo dejaría de respetarse — que fue justo el bug que mandó de más.
-                total_ocupado, long_ocupado, short_ocupado = contar_posiciones_por_lado(exchange)
+                # Se vuelve a consultar el cupo real (pudo cambiar mientras se escaneaban los
+                # 400+ pares) y de ahí en adelante se lleva la cuenta EN MEMORIA: no se vuelve
+                # a preguntar al exchange por cada candidata dentro de este bucle.
+                cupo_verificado, total_ocupado, long_ocupado, short_ocupado = contar_posiciones_por_lado(exchange)
                 ejecutadas = 0
 
-                for i, c in enumerate(candidatas_ordenadas, 1):
-                    lado = 'LONG' if c['es_long'] else 'SHORT'
-                    print(f"   #{i} {c['symbol']} {lado} | score={c['score']:.3f} | ratio=1:{c['ratio']:.2f} "
-                          f"| vol={c['volumen_entrada']:,.0f} | mov_sl={c['pct_movimiento_sl']:.2f}%")
+                if not cupo_verificado:
+                    print("   ⚠️  No se pudo reverificar el cupo antes de ejecutar; por seguridad, "
+                          "se cancela la ejecución de este ciclo.")
+                else:
+                    for i, c in enumerate(candidatas_ordenadas, 1):
+                        lado = 'LONG' if c['es_long'] else 'SHORT'
+                        print(f"   #{i} {c['symbol']} {lado} | score={c['score']:.3f} | ratio=1:{c['ratio']:.2f} "
+                              f"| vol={c['volumen_entrada']:,.0f} | mov_sl={c['pct_movimiento_sl']:.2f}%")
 
-                    cupo_ok, motivo = hay_cupo(total_ocupado, long_ocupado, short_ocupado, c['es_long'])
-                    if not cupo_ok:
-                        print(f"      ⏭️  Sin cupo para {lado}: {motivo}. Se detiene la evaluación de este ciclo.")
-                        break  # ya no tiene sentido seguir revisando el resto de candidatas
+                        cupo_ok, motivo = hay_cupo(total_ocupado, long_ocupado, short_ocupado, c['es_long'])
+                        if not cupo_ok:
+                            print(f"      ⏭️  Sin cupo para {lado}: {motivo}. Se detiene la evaluación de este ciclo "
+                                  f"(cupo lleno = no se manda nada más).")
+                            break  # ya no tiene sentido seguir revisando el resto de candidatas
 
-                    if tiene_posicion_u_orden_abierta(exchange, c['symbol']):
-                        print(f"      ⏭️  Ya hay posición/orden abierta en {c['symbol']}, se omite.")
-                        continue
+                        if tiene_posicion_u_orden_abierta(exchange, c['symbol']):
+                            print(f"      ⏭️  Ya hay posición/orden abierta en {c['symbol']}, se omite.")
+                            continue
 
-                    if ejecutar_operacion(exchange, c['symbol'], c['market_info'], c['es_long'],
-                                          c['precio_entrada'], c['precio_stop'], c['calc']):
-                        total_ocupado += 1
-                        ejecutadas += 1
-                        if c['es_long']:
-                            long_ocupado += 1
-                        else:
-                            short_ocupado += 1
+                        if ejecutar_operacion(exchange, c['symbol'], c['market_info'], c['es_long'],
+                                              c['precio_entrada'], c['precio_stop'], c['calc']):
+                            total_ocupado += 1
+                            ejecutadas += 1
+                            if c['es_long']:
+                                long_ocupado += 1
+                            else:
+                                short_ocupado += 1
 
-                print(f"   ✅ {ejecutadas} operación(es) ejecutada(s) este ciclo "
-                      f"(cupo: {total_ocupado}/{MAX_OPERACIONES_ABIERTAS}).")
+                    print(f"   ✅ {ejecutadas} operación(es) ejecutada(s) este ciclo "
+                          f"(cupo: {total_ocupado}/{MAX_OPERACIONES_ABIERTAS}).")
 
-            print(f"😴 Descansando {MINUTOS_ESPERA_ENTRE_CICLOS} minuto(s)...\n")
-            time.sleep(MINUTOS_ESPERA_ENTRE_CICLOS * 60)
+            # Sin reloj fijo: apenas termina este ciclo, se vuelve arriba a revisar el cupo.
+            # Si sigue habiendo espacio, escanea de nuevo enseguida; si se llenó, entra en
+            # modo espera (el bloque del principio del bucle). Así, en cuanto se libera un
+            # cupo, el bot lo nota y actúa de inmediato, sin esperar un reloj de minutos.
+            print()
 
         except Exception as e:
             print(f"\n📡 [{time.strftime('%H:%M:%S')}] Conexión de red interrumpida. Reintentando en {PAUSA_ERROR_RED_SEG}s...")
