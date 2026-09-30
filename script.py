@@ -1156,7 +1156,14 @@ def escanear_perpetuos_binance():
         'apiKey': BINANCE_API_KEY,
         'secret': BINANCE_API_SECRET,
         'enableRateLimit': True,
-        'options': {'defaultType': 'future'}
+        'options': {
+            'defaultType': 'future',
+            # fetch_open_orders() sin símbolo (usado para contar el cupo en TODA la cuenta)
+            # tiene límites de tasa más estrictos en Binance; ccxt solo quiere AVISAR de eso,
+            # no es un error. Sin esto, ccxt lanza la advertencia como excepción y activa
+            # el modo fail-safe (cupo lleno) en cada ciclo, sin motivo real.
+            'warnOnFetchOpenOrdersWithoutSymbol': False,
+        }
     })
     if USAR_TESTNET:
         exchange.set_sandbox_mode(True)
