@@ -49,6 +49,12 @@ PESO_RATIO = 0.5             # Qué tanto pesa el ratio R:R en el score
 PESO_VOLUMEN = 0.3           # Qué tanto pesa el volumen del muro de entrada (más órdenes reales detrás)
 PESO_MOVIMIENTO_SL = 0.2     # Qué tanto pesa que el SL NO esté demasiado pegado al precio
 
+# ------------------------------------------------------------------------------
+# CONTROL DE CUPO EN TIEMPO REAL (Seguridad para Termux / Linux)
+# ------------------------------------------------------------------------------
+_lock_cupo = threading.Lock()
+ORDENES_RECIEN_ENVIADAS = {}  # {symbol: {'time': timestamp, 'es_long': bool}}
+
 try:
     from config import BINANCE_API_KEY, BINANCE_API_SECRET  # noqa: E402
 except ImportError:
@@ -140,19 +146,13 @@ def calcular_trailing_protector(precio_entrada, precio_stop, activacion_r=ACTIVA
 def contar_posiciones_por_lado(exchange):
     """
     Cuenta cuánto cupo está ocupado: posiciones YA abiertas (fetch_positions) MÁS
-    órdenes LIMIT de entrada de ESTE bot que todavía no se llenan (_pendientes_del_bot).
-    Sin esto, una entrada límite que aún no se ejecutó no cuenta para nada y el bot
-    seguiría mandando órdenes hasta llenar TODOS los candidatos del ciclo.
-
-    Devuelve (ok, total_ocupado, longs_ocupados, shorts_ocupados).
-    ok=False significa que NO se pudo verificar el cupo con confianza (falló la consulta
-    al exchange) — quien llama a esta función DEBE tratar ok=False como "cupo lleno",
-    nunca como "cupo vacío". Devolver 0 en silencio ante un error fue exactamente el bug
-    que dejó pasar 6 órdenes reales con MAX_OPERACIONES_ABIERTAS=2.
+    órdenes LIMIT de entrada de ESTE bot que todavía no se llenan (_pendientes_del_bot) MÁS
+    órdenes enviadas localmente en el ciclo actual que Binance aún no refleje.
     """
     longs = 0
     shorts = 0
     ok = True
+    simbolos_contados = set()
 
     try:
         posiciones = exchange.fetch_positions()
@@ -161,6 +161,8 @@ def contar_posiciones_por_lado(exchange):
             if not contratos or float(contratos) == 0:
                 continue
             lado = p.get('side')  # ccxt unificado: 'long' o 'short'
+            sym = p.get('symbol')
+            simbolos_contados.add(sym)
             if lado == 'long':
                 longs += 1
             elif lado == 'short':
@@ -177,6 +179,8 @@ def contar_posiciones_por_lado(exchange):
 
     try:
         for o in _pendientes_del_bot(exchange):
+            sym = o.get('symbol')
+            simbolos_contados.add(sym)
             lado = o.get('side')  # ccxt unificado: 'buy' o 'sell'
             if lado == 'buy':
                 longs += 1
@@ -185,6 +189,21 @@ def contar_posiciones_por_lado(exchange):
     except Exception as e:
         print(f"⚠️ No se pudo consultar las órdenes pendientes para el cupo ({e}). Por seguridad, se asume cupo LLENO.")
         ok = False
+
+    # Sumar órdenes locales recién enviadas que Binance aún no haya reflejado en la API
+    with _lock_cupo:
+        ahora = time.time()
+        para_borrar = []
+        for sym, data in ORDENES_RECIEN_ENVIADAS.items():
+            if ahora - data['time'] > 60 or sym in simbolos_contados:
+                para_borrar.append(sym)
+            else:
+                if data['es_long']:
+                    longs += 1
+                else:
+                    shorts += 1
+        for sym in para_borrar:
+            del ORDENES_RECIEN_ENVIADAS[sym]
 
     return ok, longs + shorts, longs, shorts
 
@@ -253,6 +272,10 @@ def tiene_posicion_u_orden_abierta(exchange, symbol):
     True si ya hay posición abierta, alguna orden viva en ese símbolo, o si no se pudo
     verificar con confianza (fail-safe: ante la duda, se omite en vez de arriesgarse a duplicar).
     """
+    with _lock_cupo:
+        if symbol in ORDENES_RECIEN_ENVIADAS:
+            return True
+
     try:
         posiciones = exchange.fetch_positions([symbol])
         for p in posiciones:
@@ -355,6 +378,8 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
     if not EJECUTAR_ORDENES_REALES:
         print("   🔒 EJECUTAR_ORDENES_REALES=False → no se mandó ninguna orden real "
               "(cuenta como ejecutada para que la simulación de cupo sea realista).\n")
+        with _lock_cupo:
+            ORDENES_RECIEN_ENVIADAS[symbol] = {'time': time.time(), 'es_long': es_long}
         return True
 
     if not BINANCE_API_KEY or not BINANCE_API_SECRET:
@@ -367,6 +392,11 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
         orden_entrada = exchange.create_order(symbol, 'limit', lado_entrada, cantidad_ok, precio_ok,
                                               params={'clientOrderId': client_id})
         print(f"   ✅ Orden de entrada enviada. id={orden_entrada.get('id')}")
+
+        # REGISTRO LOCAL EN TIEMPO REAL: Evita duplicar operaciones en entornos rápidos
+        with _lock_cupo:
+            ORDENES_RECIEN_ENVIADAS[symbol] = {'time': time.time(), 'es_long': es_long}
+
     except Exception as e:
         print(f"   ❌ Error mandando la orden de entrada: {e}\n")
         tg_enviar(f"❌ ERROR mandando entrada en {symbol}: {e}")
@@ -759,8 +789,6 @@ def hilo_telegram():
                                  json=payload, timeout=30).json()
             if not resp.get('ok'):
                 if resp.get('error_code') == 409:
-                    # Normal al reiniciar el script: Telegram aún no soltó la conexión anterior.
-                    # Se resuelve solo en unos segundos; solo avisamos UNA vez, no en cada intento.
                     if not aviso_409_mostrado:
                         print("⚠️ Telegram: liberando la conexión de la corrida anterior (normal al "
                               "reiniciar), reintentando en silencio...")
@@ -1012,8 +1040,6 @@ def hilo_monitor(exchange):
         time.sleep(INTERVALO_MONITOR_SEG)
 
 
-
-
 def calcular_entrada(capital, riesgo_pct, precio_entrada, precio_stop, leverage):
     """
     Traduce la calculadora de Excel (hojas LONG/SHORT) a código:
@@ -1158,10 +1184,6 @@ def escanear_perpetuos_binance():
         'enableRateLimit': True,
         'options': {
             'defaultType': 'future',
-            # fetch_open_orders() sin símbolo (usado para contar el cupo en TODA la cuenta)
-            # tiene límites de tasa más estrictos en Binance; ccxt solo quiere AVISAR de eso,
-            # no es un error. Sin esto, ccxt lanza la advertencia como excepción y activa
-            # el modo fail-safe (cupo lleno) en cada ciclo, sin motivo real.
             'warnOnFetchOpenOrdersWithoutSymbol': False,
         }
     })
@@ -1185,9 +1207,6 @@ def escanear_perpetuos_binance():
     
     while True:
         try:
-            # Primero se revisa el cupo: si ya está lleno (o no se pudo verificar con
-            # confianza), no tiene sentido escanear 400+ pares para nada — solo se espera,
-            # en intervalos cortos, a que el hilo monitor detecte que algo se cerró.
             cupo_verificado, total_ocupado, long_ocupado, short_ocupado = contar_posiciones_por_lado(exchange)
             if not cupo_verificado:
                 print(f"🟡 [{time.strftime('%H:%M:%S')}] No se pudo verificar el cupo con seguridad. "
@@ -1340,9 +1359,6 @@ def escanear_perpetuos_binance():
                 candidatas_ordenadas = ordenar_candidatas_por_score(señales_candidatas)
                 print(f"\n📊 [{hora_fin}] Ciclo finalizado con {len(candidatas_ordenadas)} candidata(s), evaluando por score...")
 
-                # Se vuelve a consultar el cupo real (pudo cambiar mientras se escaneaban los
-                # 400+ pares) y de ahí en adelante se lleva la cuenta EN MEMORIA: no se vuelve
-                # a preguntar al exchange por cada candidata dentro de este bucle.
                 cupo_verificado, total_ocupado, long_ocupado, short_ocupado = contar_posiciones_por_lado(exchange)
                 ejecutadas = 0
 
@@ -1359,7 +1375,7 @@ def escanear_perpetuos_binance():
                         if not cupo_ok:
                             print(f"      ⏭️  Sin cupo para {lado}: {motivo}. Se detiene la evaluación de este ciclo "
                                   f"(cupo lleno = no se manda nada más).")
-                            break  # ya no tiene sentido seguir revisando el resto de candidatas
+                            break
 
                         if tiene_posicion_u_orden_abierta(exchange, c['symbol']):
                             print(f"      ⏭️  Ya hay posición/orden abierta en {c['symbol']}, se omite.")
@@ -1377,10 +1393,6 @@ def escanear_perpetuos_binance():
                     print(f"   ✅ {ejecutadas} operación(es) ejecutada(s) este ciclo "
                           f"(cupo: {total_ocupado}/{MAX_OPERACIONES_ABIERTAS}).")
 
-            # Sin reloj fijo: apenas termina este ciclo, se vuelve arriba a revisar el cupo.
-            # Si sigue habiendo espacio, escanea de nuevo enseguida; si se llenó, entra en
-            # modo espera (el bloque del principio del bucle). Así, en cuanto se libera un
-            # cupo, el bot lo nota y actúa de inmediato, sin esperar un reloj de minutos.
             print()
 
         except Exception as e:
