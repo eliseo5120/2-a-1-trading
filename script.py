@@ -103,18 +103,6 @@ def calcular_trailing_protector(precio_entrada, precio_stop, activacion_r=ACTIVA
     Calcula activationPrice y callbackRate para que el TRAILING_STOP_MARKET,
     en el momento en que se activa, quede protegiendo exactamente el nivel 1:1
     (no el breakeven). Se activa cuando el precio llega a `activacion_r` * R.
-
-    Para LONG (precio_entrada > precio_stop):
-        R = precio_entrada - precio_stop
-        activation_price = precio_entrada + activacion_r * R
-        protegido_1_1    = precio_entrada + R
-        callback_rate    = 1 - (protegido_1_1 / activation_price)
-
-    Para SHORT (precio_entrada < precio_stop):
-        R = precio_stop - precio_entrada
-        activation_price = precio_entrada - activacion_r * R
-        protegido_1_1    = precio_entrada - R
-        callback_rate    = (protegido_1_1 / activation_price) - 1
     """
     es_long = precio_entrada > precio_stop
     r = abs(precio_entrada - precio_stop)
@@ -131,8 +119,6 @@ def calcular_trailing_protector(precio_entrada, precio_stop, activacion_r=ACTIVA
         callback_rate = (protegido_1_1 / activation_price) - 1
 
     callback_rate_pct = callback_rate * 100
-    # Binance exige callbackRate entre 0.1% y 5%. Si el riesgo es muy chico/grande
-    # respecto al precio, se recorta al límite permitido (deja de proteger el 1:1 exacto).
     callback_rate_pct_ajustado = max(0.1, min(5.0, round(callback_rate_pct, 1)))
 
     return {
@@ -145,9 +131,10 @@ def calcular_trailing_protector(precio_entrada, precio_stop, activacion_r=ACTIVA
 
 def contar_posiciones_por_lado(exchange):
     """
-    Cuenta cuánto cupo está ocupado: posiciones YA abiertas (fetch_positions) MÁS
-    órdenes LIMIT de entrada de ESTE bot que todavía no se llenan (_pendientes_del_bot) MÁS
-    órdenes enviadas localmente en el ciclo actual que Binance aún no refleje.
+    Cuenta cuánto cupo está ocupado:
+    1. Posiciones YA abiertas (buscando contratos en CCXT e info.positionAmt de Binance).
+    2. Órdenes LIMIT de entrada pendientes (_pendientes_del_bot).
+    3. Órdenes enviadas localmente en el ciclo actual que Binance aún no refleje.
     """
     longs = 0
     shorts = 0
@@ -157,22 +144,30 @@ def contar_posiciones_por_lado(exchange):
     try:
         posiciones = exchange.fetch_positions()
         for p in posiciones:
-            contratos = p.get('contracts') or 0
-            if not contratos or float(contratos) == 0:
+            # Detección multiformato de contratos (compatibilidad total con Termux/Linux)
+            contratos_raw = p.get('contracts')
+            if contratos_raw is None:
+                info = p.get('info') or {}
+                contratos_raw = info.get('positionAmt') or info.get('contracts') or 0
+
+            try:
+                contratos = float(contratos_raw)
+            except (TypeError, ValueError):
+                contratos = 0.0
+
+            if abs(contratos) == 0:
                 continue
-            lado = p.get('side')  # ccxt unificado: 'long' o 'short'
+
             sym = p.get('symbol')
-            simbolos_contados.add(sym)
-            if lado == 'long':
+            if sym:
+                simbolos_contados.add(sym)
+
+            lado = p.get('side')
+            if lado == 'long' or (not lado and contratos > 0):
                 longs += 1
-            elif lado == 'short':
+            elif lado == 'short' or (not lado and contratos < 0):
                 shorts += 1
-            else:
-                # Respaldo si el exchange no manda 'side': usar el signo de 'contracts'
-                if float(contratos) > 0:
-                    longs += 1
-                else:
-                    shorts += 1
+
     except Exception as e:
         print(f"⚠️ No se pudo consultar fetch_positions() para el cupo ({e}). Por seguridad, se asume cupo LLENO.")
         ok = False
@@ -180,8 +175,9 @@ def contar_posiciones_por_lado(exchange):
     try:
         for o in _pendientes_del_bot(exchange):
             sym = o.get('symbol')
-            simbolos_contados.add(sym)
-            lado = o.get('side')  # ccxt unificado: 'buy' o 'sell'
+            if sym:
+                simbolos_contados.add(sym)
+            lado = o.get('side')
             if lado == 'buy':
                 longs += 1
             elif lado == 'sell':
@@ -209,24 +205,12 @@ def contar_posiciones_por_lado(exchange):
 
 
 def _normalizar(valor, minimo, maximo):
-    """Escala 'valor' a un rango 0-1 según el mínimo/máximo del ciclo. Si todas las
-    candidatas tienen el mismo valor, no penaliza a nadie por esa métrica (da 1.0 a todas)."""
     if maximo == minimo:
         return 1.0
     return (valor - minimo) / (maximo - minimo)
 
 
 def ordenar_candidatas_por_score(candidatas):
-    """
-    Recibe la lista de señales que calificaron en el ciclo y las ordena de mejor a peor
-    según un score combinado:
-      - ratio R:R              (más alto = mejor)
-      - volumen del muro de entrada (más alto = muro más sólido = mejor)
-      - % de movimiento hasta el SL (más alto = SL menos pegado al precio = mejor)
-    Cada métrica se normaliza 0-1 DENTRO del ciclo (comparando solo contra las demás
-    candidatas de esa misma ronda), y se combina con los pesos PESO_RATIO/PESO_VOLUMEN/
-    PESO_MOVIMIENTO_SL.
-    """
     if not candidatas:
         return []
 
@@ -248,13 +232,6 @@ def ordenar_candidatas_por_score(candidatas):
 
 
 def hay_cupo(total_ocupado, long_ocupado, short_ocupado, es_long):
-    """
-    Evalúa el cupo usando CONTADORES YA CALCULADOS (no vuelve a preguntarle al exchange).
-    Esto es a propósito: consultar el exchange una vez por candidata es lento, se puede topar
-    con límites de rate-limit, y si esa consulta falla en silencio el cupo deja de respetarse
-    (exactamente el bug que mandó de más operaciones). Contando en memoria, local al ciclo,
-    el tope de MAX_OPERACIONES_ABIERTAS se respeta pase lo que pase con la red.
-    """
     if total_ocupado >= MAX_OPERACIONES_ABIERTAS:
         return False, f"cupo total lleno ({total_ocupado}/{MAX_OPERACIONES_ABIERTAS})"
 
@@ -268,10 +245,6 @@ def hay_cupo(total_ocupado, long_ocupado, short_ocupado, es_long):
 
 
 def tiene_posicion_u_orden_abierta(exchange, symbol):
-    """
-    True si ya hay posición abierta, alguna orden viva en ese símbolo, o si no se pudo
-    verificar con confianza (fail-safe: ante la duda, se omite en vez de arriesgarse a duplicar).
-    """
     with _lock_cupo:
         if symbol in ORDENES_RECIEN_ENVIADAS:
             return True
@@ -279,8 +252,17 @@ def tiene_posicion_u_orden_abierta(exchange, symbol):
     try:
         posiciones = exchange.fetch_positions([symbol])
         for p in posiciones:
-            contratos = p.get('contracts') or 0
-            if contratos and float(contratos) != 0:
+            contratos_raw = p.get('contracts')
+            if contratos_raw is None:
+                info = p.get('info') or {}
+                contratos_raw = info.get('positionAmt') or info.get('contracts') or 0
+            
+            try:
+                contratos = float(contratos_raw)
+            except (TypeError, ValueError):
+                contratos = 0.0
+
+            if abs(contratos) > 0:
                 return True
     except Exception as e:
         print(f"⚠️ No se pudo verificar posición en {symbol} ({e}). Por seguridad, se omite esta candidata.")
@@ -298,11 +280,6 @@ def tiene_posicion_u_orden_abierta(exchange, symbol):
 
 
 def validar_precision_y_notional(exchange, symbol, market_info, cantidad, precio_entrada):
-    """
-    Redondea cantidad/precio a los pasos que exige el exchange (stepSize/tickSize) y valida
-    minQty y minNotional ANTES de mandar nada. Devuelve (cantidad_ok, precio_ok, error) —
-    error=None si todo pasa, o un texto explicando por qué no se puede operar ese par.
-    """
     try:
         cantidad_str = exchange.amount_to_precision(symbol, cantidad)
         precio_str = exchange.price_to_precision(symbol, precio_entrada)
@@ -313,7 +290,7 @@ def validar_precision_y_notional(exchange, symbol, market_info, cantidad, precio
 
     limites = market_info.get('limits', {}) or {}
     min_qty = ((limites.get('amount') or {}).get('min'))
-    min_notional = ((limites.get('cost') or {}).get('min')) or 5.0  # respaldo: mínimo típico de Binance
+    min_notional = ((limites.get('cost') or {}).get('min')) or 5.0
     notional = cantidad_ok * precio_ok
 
     if cantidad_ok <= 0:
@@ -322,40 +299,24 @@ def validar_precision_y_notional(exchange, symbol, market_info, cantidad, precio
         return None, None, f"cantidad {cantidad_ok} por debajo del mínimo del par ({min_qty})"
     if min_notional and notional < min_notional:
         return None, None, (f"el valor de la orden ({notional:.2f} USDT) está por debajo del "
-                             f"mínimo que exige Binance para este par ({min_notional} USDT) — "
-                             f"sube CAPITAL_DISPONIBLE/RIESGO_PCT o salta este par")
+                             f"mínimo que exige Binance para este par ({min_notional} USDT)")
 
     return cantidad_ok, precio_ok, None
 
 
-PROTECCION_PENDIENTE = {}   # symbol -> datos del SL/trailing a colocar en cuanto exista la posición
+PROTECCION_PENDIENTE = {}
 _lock_proteccion = threading.Lock()
 
 
 def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, precio_stop, calc):
-    """
-    Secuencia cuando salta una alerta:
-      1. Valida precisión y notional mínimo del par (sin gastar cupo si no pasa).
-      2. Fija el leverage.
-      3. Manda la orden LIMIT de entrada al precio del muro detectado.
-      4. Guarda el SL/Trailing calculados como "pendientes" — el hilo monitor los coloca
-         en cuanto detecta que la posición realmente existe (Binance exige que la posición
-         ya esté abierta para aceptar una orden condicional con closePosition=true; mandarla
-         antes de que la entrada se llene da el error -4509/TIF GTE).
-    Con EJECUTAR_ORDENES_REALES=False solo imprime lo que haría, sin mandar nada.
-
-    Devuelve True si la operación se ejecutó (o se habría ejecutado, en modo simulado) y por
-    lo tanto debe contar para el cupo de MAX_OPERACIONES_ABIERTAS; False si se omitió y el
-    cupo sigue disponible para la siguiente candidata.
-    """
     lado_entrada = 'buy' if es_long else 'sell'
     lado_cierre = 'SELL' if es_long else 'BUY'
-    simbolo_binance = market_info['id']  # ej. 'BTCUSDT' (formato crudo de la API)
+    simbolo_binance = market_info['id']
     cantidad = calc['cantidad_monedas']
 
     trailing = calcular_trailing_protector(precio_entrada, precio_stop)
     if not trailing:
-        print("   ⚠️  No se pudo calcular el trailing (precio de entrada = stop). Se omite la operación.")
+        print("   ⚠️  No se pudo calcular el trailing. Se omite la operación.")
         return False
 
     try:
@@ -364,20 +325,15 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
         cantidad_ok, precio_ok, error = None, None, f"no se pudo validar contra el exchange ({e})"
 
     print(f"   🤖 Plan de ejecución: LIMIT {lado_entrada.upper()} {cantidad} {market_info['base']} @ {precio_entrada}")
-    print(f"   🤖 SL (se arma cuando la posición exista): {precio_stop}")
-    print(f"   🤖 Trailing protector 1:1 → activación {trailing['activation_price']:.8f} "
-          f"| callback {trailing['callback_rate_pct_ajustado']}% "
-          f"(protege ≈ {trailing['protegido_1_1']:.8f})")
+    print(f"   🤖 SL: {precio_stop}")
+    print(f"   🤖 Trailing 1:1 → activación {trailing['activation_price']:.8f} | callback {trailing['callback_rate_pct_ajustado']}%")
 
     if error:
-        # Se omite en silencio hacia Telegram a propósito: el usuario solo quiere avisos de
-        # operaciones BUENAS que sí se mandan a Binance, no de cada candidata descartada.
         print(f"   ⏭️  Se omite {symbol}: {error}.\n")
         return False
 
     if not EJECUTAR_ORDENES_REALES:
-        print("   🔒 EJECUTAR_ORDENES_REALES=False → no se mandó ninguna orden real "
-              "(cuenta como ejecutada para que la simulación de cupo sea realista).\n")
+        print("   🔒 EJECUTAR_ORDENES_REALES=False → simulación. Se registra cupo virtualmente.\n")
         with _lock_cupo:
             ORDENES_RECIEN_ENVIADAS[symbol] = {'time': time.time(), 'es_long': es_long}
         return True
@@ -393,7 +349,6 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
                                               params={'clientOrderId': client_id})
         print(f"   ✅ Orden de entrada enviada. id={orden_entrada.get('id')}")
 
-        # REGISTRO LOCAL EN TIEMPO REAL: Evita duplicar operaciones en entornos rápidos
         with _lock_cupo:
             ORDENES_RECIEN_ENVIADAS[symbol] = {'time': time.time(), 'es_long': es_long}
 
@@ -402,7 +357,6 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
         tg_enviar(f"❌ ERROR mandando entrada en {symbol}: {e}")
         return False
 
-    # Ya hay una orden real puesta -> cuenta para el cupo pase lo que pase de aquí en más.
     with _lock_proteccion:
         PROTECCION_PENDIENTE[symbol] = {
             'simbolo_binance': simbolo_binance,
@@ -412,7 +366,7 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
             'callback_rate': trailing['callback_rate_pct_ajustado'],
             'protegido_1_1': trailing['protegido_1_1'],
         }
-    print(f"   ⏳ SL/Trailing quedaron pendientes: se colocan automáticamente en cuanto la entrada se llene.\n")
+    print(f"   ⏳ SL/Trailing quedaron pendientes para cuando se llene la entrada.\n")
     tg_enviar(f"📥 ENTRADA ENVIADA: {symbol} {'LONG' if es_long else 'SHORT'}\n"
               f"LIMIT: {precio_ok} | Cantidad: {cantidad_ok}\n"
               f"SL/Trailing se arman solos en cuanto se llene la entrada.")
@@ -421,15 +375,10 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
 
 
 def colocar_proteccion_pendiente(exchange, symbol):
-    """
-    Se llama desde hilo_monitor apenas detecta que una posición nueva apareció. Si esa
-    posición corresponde a una entrada que mandamos nosotros (está en PROTECCION_PENDIENTE),
-    coloca ahora sí el STOP_MARKET y el TRAILING_STOP_MARKET (ya se puede: la posición existe).
-    """
     with _lock_proteccion:
         info = PROTECCION_PENDIENTE.pop(symbol, None)
     if not info:
-        return  # posición que no abrió este bot (o ya se le colocó protección antes)
+        return
 
     try:
         _binance_signed_request('POST', '/fapi/v1/algoOrder', {
@@ -466,19 +415,18 @@ def colocar_proteccion_pendiente(exchange, symbol):
 
 
 # ==============================================================================
-# AJUSTES PERSISTENTES (editables por Telegram, sobreviven a reinicios)
+# AJUSTES PERSISTENTES
 # ==============================================================================
-PREFIJO_ORDEN = "esc"   # prefijo del clientOrderId de las órdenes de entrada de ESTE bot
+PREFIJO_ORDEN = "esc"
 
 
 def _ruta(nombre):
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), nombre)
 
 
-ARCHIVO_AJUSTES = _ruta("ajustes_bot.json")   # solo guarda lo que cambias por Telegram
-ARCHIVO_ESTADO = _ruta("estado_bot.json")     # posiciones que el bot ya conoce
+ARCHIVO_AJUSTES = _ruta("ajustes_bot.json")
+ARCHIVO_ESTADO = _ruta("estado_bot.json")
 
-# nombre: (tipo, mínimo, máximo, descripción)
 AJUSTES_EDITABLES = {
     'CAPITAL_DISPONIBLE': (float, 1, 1_000_000, "Capital disponible (USDT)"),
     'RIESGO_PCT': (float, 0.1, 50, "% del capital que se arriesga por operación"),
@@ -487,7 +435,7 @@ AJUSTES_EDITABLES = {
     'SEGUNDOS_ESPERA_CUPO_LLENO': (float, 5, 3600, "Segundos entre revisiones cuando el cupo está lleno"),
     'MIN_RATIO': (float, 0.5, 100, "Ratio R:R mínimo (2 = 1:2)"),
     'ACTIVACION_TRAILING_R': (float, 1.05, 10, "Activación del trailing en múltiplos de R"),
-    'MINUTOS_MAX_ORDEN_PENDIENTE': (float, 0, 1440, "Minutos antes de cancelar una orden límite sin llenar (0 = nunca)"),
+    'MINUTOS_MAX_ORDEN_PENDIENTE': (float, 0, 1440, "Minutos antes de cancelar una orden límite sin llenar"),
     'PAUSA_ENTRE_PARES_SEG': (float, 0, 10, "Pausa entre pares (seg)"),
     'PAUSA_ERROR_RED_SEG': (float, 1, 300, "Pausa tras error de red (seg)"),
     'PESO_RATIO': (float, 0, 1, "Peso del ratio R:R en el ranking"),
@@ -551,7 +499,6 @@ def aplicar_ajuste(nombre, valor, guardar=True):
 
 
 def cargar_ajustes():
-    """Al iniciar, aplica encima de las constantes del script lo que cambiaste por Telegram."""
     if not os.path.exists(ARCHIVO_AJUSTES):
         return
     try:
@@ -762,18 +709,16 @@ def _tg_procesar(upd):
         if not _autorizado(m['chat']['id']):
             print(f"⚠️ Mensaje de un chat NO autorizado: recibido={m['chat']['id']!r} vs config={TELEGRAM_CHAT_ID!r} "
                   f"(texto: {m.get('text', '')!r}). Si este ID es el tuyo, corrígelo en config.py.")
-            return  # ignora a cualquiera que no sea tu chat
+            return
         texto = m.get('text', '')
         if texto.startswith('/'):
             _tg_comando(texto)
 
 
 def hilo_telegram():
-    """Escucha comandos y botones. Solo responde al TELEGRAM_CHAT_ID configurado."""
     if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
         return
     offset = None
-    # Descarta comandos viejos acumulados mientras el bot estaba apagado
     r = _tg_api('getUpdates', {'offset': -1, 'timeout': 0})
     if r and r.get('result'):
         offset = r['result'][-1]['update_id'] + 1
@@ -790,15 +735,14 @@ def hilo_telegram():
             if not resp.get('ok'):
                 if resp.get('error_code') == 409:
                     if not aviso_409_mostrado:
-                        print("⚠️ Telegram: liberando la conexión de la corrida anterior (normal al "
-                              "reiniciar), reintentando en silencio...")
+                        print("⚠️ Telegram: liberando la conexión de la corrida anterior...")
                         aviso_409_mostrado = True
                 else:
                     print(f"⚠️ Telegram getUpdates: {resp}")
                 time.sleep(3)
                 continue
             if aviso_409_mostrado:
-                print("✅ Telegram: conexión recuperada, ya está escuchando comandos normal.")
+                print("✅ Telegram: conexión recuperada.")
                 aviso_409_mostrado = False
             for upd in resp.get('result', []):
                 offset = upd['update_id'] + 1
@@ -812,13 +756,12 @@ def hilo_telegram():
 
 
 # ==============================================================================
-# PNL REAL (se recalcula siempre desde el historial de Binance: no depende de archivos locales)
+# PNL REAL
 # ==============================================================================
 TIPOS_PNL = ('REALIZED_PNL', 'COMMISSION', 'FUNDING_FEE')
 
 
 def obtener_income(desde_ms):
-    """Movimientos de la cuenta de futuros desde `desde_ms` (paginado)."""
     registros = []
     inicio = desde_ms
     while True:
@@ -833,7 +776,6 @@ def obtener_income(desde_ms):
 
 
 def calcular_pnl_periodos():
-    """PnL neto (realizado + comisiones + funding) de hoy, esta semana (desde el lunes) y este mes."""
     ahora = datetime.now(TZ_LOCAL)
     hoy0 = ahora.replace(hour=0, minute=0, second=0, microsecond=0)
     semana0 = hoy0 - timedelta(days=hoy0.weekday())
@@ -878,7 +820,7 @@ def _pnl_operacion(id_binance, desde_ms):
 
 
 # ==============================================================================
-# MONITOR DE POSICIONES (abiertas / cerradas / órdenes pendientes) — hilo aparte
+# MONITOR DE POSICIONES
 # ==============================================================================
 _lock_estado = threading.Lock()
 POSICIONES_ACTUALES = {}
@@ -904,11 +846,17 @@ def _guardar_estado(estado):
 def _leer_posiciones(exchange):
     res = {}
     for p in exchange.fetch_positions():
+        contratos_raw = p.get('contracts')
+        if contratos_raw is None:
+            info = p.get('info') or {}
+            contratos_raw = info.get('positionAmt') or info.get('contracts') or 0
+        
         try:
-            contratos = float(p.get('contracts') or 0)
+            contratos = float(contratos_raw)
         except (TypeError, ValueError):
             contratos = 0.0
-        if contratos == 0:
+
+        if abs(contratos) == 0:
             continue
         sym = p.get('symbol')
         info = p.get('info') or {}
@@ -924,7 +872,6 @@ def _leer_posiciones(exchange):
 
 
 def _pendientes_del_bot(exchange):
-    """Órdenes límite de entrada enviadas por este bot que todavía no se llenan."""
     pendientes = []
     for o in exchange.fetch_open_orders():
         if str(o.get('clientOrderId') or '').startswith(PREFIJO_ORDEN) and not o.get('reduceOnly'):
@@ -933,7 +880,6 @@ def _pendientes_del_bot(exchange):
 
 
 def limpiar_ordenes_simbolo(exchange, symbol, id_binance):
-    """Cancela órdenes normales y condicionales (SL/trailing) que hayan quedado de ese símbolo."""
     try:
         exchange.cancel_all_orders(symbol)
     except Exception:
@@ -966,22 +912,13 @@ def texto_posiciones():
 
 
 def hilo_monitor(exchange):
-    """
-    Cada INTERVALO_MONITOR_SEG segundos compara las posiciones reales de la cuenta contra las
-    que el bot ya conocía (guardadas en estado_bot.json):
-      - aparece una nueva  -> avisa 'ABIERTA'
-      - desaparece una     -> avisa 'CERRADA' con su PnL real y los acumulados diario/semanal/mensual
-    Como el estado está en disco, si el bot estuvo apagado mientras se cerraba una operación,
-    la detecta y la reporta al volver a encender. También cancela órdenes límite sin llenar
-    (MINUTOS_MAX_ORDEN_PENDIENTE) para que no bloqueen el cupo.
-    """
     global POSICIONES_ACTUALES, ORDENES_PENDIENTES
     conocidas = _cargar_estado().get('posiciones', {})
     primera = True
 
     while True:
         try:
-            actuales = _leer_posiciones(exchange)   # si falla, salta al except: no se toma como "todo cerrado"
+            actuales = _leer_posiciones(exchange)
             ahora_ms = int(time.time() * 1000)
 
             for sym, p in actuales.items():
@@ -998,7 +935,7 @@ def hilo_monitor(exchange):
             for sym in list(conocidas):
                 if sym not in actuales:
                     info = conocidas.pop(sym)
-                    time.sleep(4)  # el historial de Binance tarda unos segundos en reflejar el cierre
+                    time.sleep(4)
                     try:
                         pnl_op = _pnl_operacion(info['id'], info['apertura_ms'])
                         pnl_txt = f"{pnl_op:+,.2f} USDT" + (" (aprox., ya estaba abierta al iniciar el bot)" if info.get('aprox') else "")
@@ -1041,15 +978,6 @@ def hilo_monitor(exchange):
 
 
 def calcular_entrada(capital, riesgo_pct, precio_entrada, precio_stop, leverage):
-    """
-    Traduce la calculadora de Excel (hojas LONG/SHORT) a código:
-    - riesgo_pct se pasa como número entero (10 = 10%), aquí se convierte a fracción.
-    - % de movimiento = distancia entre entrada y stop, relativa al precio MENOR de los dos.
-    - Pérdida en USD  = capital * (riesgo_pct / 100).
-    - Capital a usar   = pérdida USD / % de movimiento  (valor NOCIONAL de la posición).
-    - Cantidad monedas = capital a usar / precio de entrada (el leverage NO multiplica aquí).
-    - Margen necesario = capital a usar / leverage (lo que realmente se bloquea en la cuenta).
-    """
     numero_mayor = max(precio_entrada, precio_stop)
     numero_menor = min(precio_entrada, precio_stop)
     diff = numero_mayor - numero_menor
@@ -1076,17 +1004,11 @@ def calcular_entrada(capital, riesgo_pct, precio_entrada, precio_stop, leverage)
 
 
 def agrupar_precio(precio, paso):
-    """ Redondea el precio al escalón exacto de la agrupación """
     precision_decimales = max(0, -int(math.floor(math.log10(paso))))
     return round(math.floor(precio / paso) * paso, precision_decimales)
 
 
 def agrupar_libro_ordenes(orders, paso):
-    """
-    Agrupa las órdenes en bloques (igual que el selector de 'Agrupación' de Binance),
-    pero además guarda, por cada bloque, el precio REAL (sin redondear) y el volumen
-    de la orden individual más grande que cae dentro de ese bloque.
-    """
     if paso <= 0:
         return {}
 
@@ -1106,11 +1028,6 @@ def agrupar_libro_ordenes(orders, paso):
 
 
 def obtener_muro_maximo_volumen(bloques_agrupados):
-    """
-    Encuentra el bloque con mayor volumen TOTAL (la 'zona' más fuerte del libro),
-    pero devuelve el precio REAL (sin redondear) de la orden con más cantidad
-    dentro de ese bloque, en vez del precio del borde del bloque.
-    """
     if not bloques_agrupados:
         return None, 0.0
 
@@ -1120,10 +1037,6 @@ def obtener_muro_maximo_volumen(bloques_agrupados):
 
 
 def obtener_dos_ultimos_niveles_adaptativos(market_info, precio_referencia):
-    """
-    Calcula los pasos de agrupación válidos que generan suficiente densidad
-    de datos sin vaciar el libro devuelto por la API.
-    """
     paso_base = None
 
     filters = market_info.get('info', {}).get('filters', [])
@@ -1139,7 +1052,6 @@ def obtener_dos_ultimos_niveles_adaptativos(market_info, precio_referencia):
         else:
             paso_base = float(tick_size)
 
-    # Generamos la lista de niveles posibles
     niveles_posibles = [
         round(paso_base, 8),
         round(paso_base * 10, 8),
@@ -1147,8 +1059,6 @@ def obtener_dos_ultimos_niveles_adaptativos(market_info, precio_referencia):
         round(paso_base * 1000, 8)
     ]
 
-    # Tomamos siempre los dos escalones más grandes de la lista (igual que las dos
-    # últimas opciones del desplegable de "Agrupación" del libro de órdenes de Binance).
     niveles_unicos = sorted(list(set(niveles_posibles)))
 
     return niveles_unicos[-2], niveles_unicos[-1]
@@ -1176,7 +1086,7 @@ def obtener_solo_perpetuos_usdt(exchange):
 
 
 def escanear_perpetuos_binance():
-    cargar_ajustes()  # aplica encima de las constantes lo que se cambió por Telegram en corridas anteriores
+    cargar_ajustes()
 
     exchange = ccxt.binance({
         'apiKey': BINANCE_API_KEY,
@@ -1321,7 +1231,7 @@ def escanear_perpetuos_binance():
                                 print(f"   ▸ Pasos: Penúltimo ({paso_penultimo}) | Último ({paso_ultimo})")
                                 print(f"   ▸ Entrada (Pico Ask N1): {venta_1} USDT | Vol: {vol_v1:,.0f} {base_currency}")
                                 print(f"   ▸ TP (Pico Bid N1):      {compra_1} USDT (-{round(pct_tp_s, 2)}%) | Vol: {vol_c1:,.0f} {base_currency}")
-                                print(f"   ▸ SL (Pico Ask N2):      {venta_2} USDT (+{round(pct_sl_s, 2)}%) | Vol: {vol_v2:,.0f} {base_currency}")
+                                print(f"   ▸ SL (Pico Ask N2):      {venta_2} USDT (+{round(pct_sl_s, 2)}%) | Vol: {vol_c2:,.0f} {base_currency}")
                                 print(f"   🎯 Ratio R:R: 1:{round(ratio_short, 2)}")
 
                                 calc = calcular_entrada(CAPITAL_DISPONIBLE, RIESGO_PCT, venta_1, venta_2, LEVERAGE)
