@@ -8,6 +8,7 @@ import os
 import sys
 import json
 import platform
+import traceback
 import threading
 from urllib.parse import urlencode
 from datetime import datetime, timedelta
@@ -23,7 +24,7 @@ PAUSA_ERROR_RED_SEG = 10          # Pausa si se cae la red
 # ------------------------------------------------------------------------------
 # CALCULADORA DE ENTRADAS (capital / riesgo / leverage) — editable
 # ------------------------------------------------------------------------------
-CAPITAL_DISPONIBLE = 20        # Capital disponible en USDT
+CAPITAL_DISPONIBLE = 20.0        # Capital disponible en USDT
 RIESGO_PCT = 5                   # % del capital que se arriesga por operación (10 = 10%)
 LEVERAGE = 10                     # Apalancamiento (solo afecta el margen necesario)
 # ==============================================================================
@@ -195,6 +196,45 @@ def contar_posiciones_por_lado(exchange):
     shorts = sum(1 for lado, _ in ocupados.values() if lado == 'short')
     detalle = [f"{sym} {lado.upper()} ({origen})" for sym, (lado, origen) in ocupados.items()]
     return ok, longs + shorts, longs, shorts, detalle
+
+
+def _normalizar(valor, minimo, maximo):
+    """Escala 'valor' a un rango 0-1 según el mínimo/máximo del ciclo. Si todas las
+    candidatas tienen el mismo valor, no penaliza a nadie por esa métrica (da 1.0 a todas)."""
+    if maximo == minimo:
+        return 1.0
+    return (valor - minimo) / (maximo - minimo)
+
+
+def ordenar_candidatas_por_score(candidatas):
+    """
+    Recibe la lista de señales que calificaron en el ciclo y las ordena de mejor a peor
+    según un score combinado:
+      - ratio R:R              (más alto = mejor)
+      - volumen del muro de entrada (más alto = muro más sólido = mejor)
+      - % de movimiento hasta el SL (más alto = SL menos pegado al precio = mejor)
+    Cada métrica se normaliza 0-1 DENTRO del ciclo (comparando solo contra las demás
+    candidatas de esa misma ronda), y se combina con los pesos PESO_RATIO/PESO_VOLUMEN/
+    PESO_MOVIMIENTO_SL.
+    """
+    if not candidatas:
+        return []
+
+    ratios = [c['ratio'] for c in candidatas]
+    volumenes = [c['volumen_entrada'] for c in candidatas]
+    movimientos = [c['pct_movimiento_sl'] for c in candidatas]
+
+    r_min, r_max = min(ratios), max(ratios)
+    v_min, v_max = min(volumenes), max(volumenes)
+    m_min, m_max = min(movimientos), max(movimientos)
+
+    for c in candidatas:
+        score_ratio = _normalizar(c['ratio'], r_min, r_max)
+        score_volumen = _normalizar(c['volumen_entrada'], v_min, v_max)
+        score_movimiento = _normalizar(c['pct_movimiento_sl'], m_min, m_max)
+        c['score'] = (score_ratio * PESO_RATIO) + (score_volumen * PESO_VOLUMEN) + (score_movimiento * PESO_MOVIMIENTO_SL)
+
+    return sorted(candidatas, key=lambda c: c['score'], reverse=True)
 
 
 def hay_cupo(total_ocupado, long_ocupado, short_ocupado, es_long):
@@ -1379,7 +1419,15 @@ def escanear_perpetuos_binance():
             print()
 
         except Exception as e:
-            print(f"\n📡 [{time.strftime('%H:%M:%S')}] Conexión de red interrumpida. Reintentando en {PAUSA_ERROR_RED_SEG}s...")
+            hora_err = time.strftime('%H:%M:%S')
+            if isinstance(e, (ccxt.NetworkError, requests.exceptions.RequestException)):
+                print(f"\n📡 [{hora_err}] Error de red ({type(e).__name__}: {e}). Reintentando en {PAUSA_ERROR_RED_SEG}s...")
+            else:
+                # Antes TODO error se mostraba como "Conexión de red interrumpida" y ocultaba
+                # fallos reales del código. Ahora se ve el error y en qué línea ocurrió.
+                print(f"\n❌ [{hora_err}] ERROR INESPERADO en el ciclo ({type(e).__name__}: {e}). "
+                      f"Reintentando en {PAUSA_ERROR_RED_SEG}s...")
+                traceback.print_exc()
             time.sleep(PAUSA_ERROR_RED_SEG)
 
 if __name__ == "__main__":
