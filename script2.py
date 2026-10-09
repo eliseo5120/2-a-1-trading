@@ -38,7 +38,7 @@ USAR_TESTNET = False                # True = fapi Testnet (dinero de prueba). Fa
 ACTIVACION_TRAILING_R = 1.5        # El trailing se activa cuando el precio llega a 1.5R.
 MAX_OPERACIONES_ABIERTAS = 4       # Operaciones simultáneas configuradas por defecto a 4.
 SEGUNDOS_ESPERA_CUPO_LLENO = 30    # Con el cupo lleno, no escanea: solo revisa cada tantos segundos
-MINUTOS_MAX_ORDEN_PENDIENTE = 15   # Tiempo límite por defecto en minutos (0 = nunca cancela)
+MINUTOS_MAX_ORDEN_PENDIENTE = 0   # Tiempo límite por defecto en minutos (0 = nunca cancela)
 
 # ------------------------------------------------------------------------------
 # RANKING DE SEÑALES
