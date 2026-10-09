@@ -1207,9 +1207,12 @@ def escanear_perpetuos_binance():
         'enableRateLimit': True,
         'options': {
             'defaultType': 'future',
-            'warnOnFetchOpenOrdersWithoutSymbol': False,  # Desactiva la excepción al consultar órdenes sin símbolo en Termux
-            'adjustForTimeDifference': True,             # Auto-sincronización del reloj con servidores de Binance
-            'recvWindow': 10000,                         # Tolerancia de latencia para red móvil
+            'warnOnFetchOpenOrdersWithoutSymbol': False,
+            'fetchOpenOrders': {
+                'warnWithoutSymbol': False,
+            },
+            'adjustForTimeDifference': True,
+            'recvWindow': 10000,
         }
     })
     if USAR_TESTNET:
@@ -1410,10 +1413,6 @@ def escanear_perpetuos_binance():
                     print(f"   ✅ {ejecutadas} operación(es) ejecutada(s) este ciclo "
                           f"(cupo: {total_ocupado}/{MAX_OPERACIONES_ABIERTAS}).")
 
-            # Sin reloj fijo: apenas termina este ciclo, se vuelve arriba a revisar el cupo.
-            # Si sigue habiendo espacio, escanea de nuevo enseguida; si se llenó, entra en
-            # modo espera (el bloque del principio del bucle). Así, en cuanto se libera un
-            # cupo, el bot lo nota y actúa de inmediato, sin esperar un reloj de minutos.
             print()
 
         except Exception as e:
@@ -1421,8 +1420,6 @@ def escanear_perpetuos_binance():
             if isinstance(e, (ccxt.NetworkError, requests.exceptions.RequestException)):
                 print(f"\n📡 [{hora_err}] Error de red ({type(e).__name__}: {e}). Reintentando en {PAUSA_ERROR_RED_SEG}s...")
             else:
-                # Antes TODO error se mostraba como "Conexión de red interrumpida" y ocultaba
-                # fallos reales del código. Ahora se ve el error y en qué línea ocurrió.
                 print(f"\n❌ [{hora_err}] ERROR INESPERADO en el ciclo ({type(e).__name__}: {e}). "
                       f"Reintentando en {PAUSA_ERROR_RED_SEG}s...")
                 traceback.print_exc()
