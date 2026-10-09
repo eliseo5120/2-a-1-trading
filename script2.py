@@ -36,7 +36,7 @@ EJECUTAR_ORDENES_REALES = True    # ⚠️ En False = solo imprime lo que HARÍA
 USAR_TESTNET = False                # True = fapi Testnet (dinero de prueba). False = Binance real.
 
 ACTIVACION_TRAILING_R = 1.5        # El trailing se activa cuando el precio llega a 1.5R.
-MAX_OPERACIONES_ABIERTAS = 2       # Cuántas operaciones simultáneas permite el bot.
+MAX_OPERACIONES_ABIERTAS = 4       # Cuántas operaciones simultáneas permite el bot.
 SEGUNDOS_ESPERA_CUPO_LLENO = 30    # Con el cupo lleno, no escanea: solo revisa cada tantos segundos
 
 # ------------------------------------------------------------------------------
