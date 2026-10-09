@@ -25,20 +25,20 @@ PAUSA_ERROR_RED_SEG = 10          # Pausa si se cae la red
 # CALCULADORA DE ENTRADAS (capital / riesgo / leverage) — editable
 # ------------------------------------------------------------------------------
 CAPITAL_DISPONIBLE = 20.0        # Capital disponible en USDT
-RIESGO_PCT = 5                   # % del capital que se arriesga por operación (10 = 10%)
-LEVERAGE = 10                     # Apalancamiento (solo afecta el margen necesario)
+RIESGO_PCT = 5                   # % del capital que se arriesga por operación
+LEVERAGE = 10                     # Apalancamiento
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
 # EJECUCIÓN DE ÓRDENES EN BINANCE — editable
 # ------------------------------------------------------------------------------
 EJECUTAR_ORDENES_REALES = True    # ⚠️ En False = solo imprime lo que HARÍA, no manda nada.
-USAR_TESTNET = False                # True = fapi Testnet (dinero de prueba). False = Binance real.
+USAR_TESTNET = False                # True = fapi Testnet. False = Binance real.
 
 ACTIVACION_TRAILING_R = 1.5        # El trailing se activa cuando el precio llega a 1.5R.
-MAX_OPERACIONES_ABIERTAS = 4       # Operaciones simultáneas configuradas por defecto a 4.
-SEGUNDOS_ESPERA_CUPO_LLENO = 30    # Con el cupo lleno, no escanea: solo revisa cada tantos segundos
-MINUTOS_MAX_ORDEN_PENDIENTE = 0   # Tiempo límite por defecto en minutos (0 = nunca cancela)
+MAX_OPERACIONES_ABIERTAS = 4       # Operaciones simultáneas configuradas a 4.
+SEGUNDOS_ESPERA_CUPO_LLENO = 30    # Con el cupo lleno, no escanea
+MINUTOS_MAX_ORDEN_PENDIENTE = 15   # Tiempo límite en minutos (0 = nunca cancela)
 
 # ------------------------------------------------------------------------------
 # RANKING DE SEÑALES
@@ -48,7 +48,7 @@ PESO_VOLUMEN = 0.3
 PESO_MOVIMIENTO_SL = 0.2     
 
 try:
-    from config import BINANCE_API_KEY, BINANCE_API_SECRET  # noqa: E402
+    from config import BINANCE_API_KEY, BINANCE_API_SECRET
 except ImportError:
     BINANCE_API_KEY, BINANCE_API_SECRET = None, None
 
@@ -62,6 +62,8 @@ BINANCE_FAPI_BASE = "https://testnet.binancefuture.com" if USAR_TESTNET else "ht
 TZ_LOCAL = ZoneInfo("America/Bogota")   
 INTERVALO_MONITOR_SEG = 20              
 # ==============================================================================
+
+USUARIO_ESPERANDO_DATO = {}  # chat_id -> variable que se está esperando ingresar
 
 
 def _binance_signed_request(method, path, params, api_key, api_secret):
@@ -468,12 +470,25 @@ def _tg_api(metodo, payload=None, timeout=15):
         return None
 
 
+# MENÚ TECLADO FIJO EN LA PANTALLA INFERIOR
+MENU_TECLADO_FIJO = {
+    'keyboard': [
+        [{'text': '⚙️ Ajustes'}, {'text': '📌 Posiciones'}],
+        [{'text': '📊 PnL'}, {'text': '📡 Estado'}]
+    ],
+    'resize_keyboard': True,
+    'persistent': True
+}
+
+
 def tg_enviar(texto, botones=None):
     if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
         return
     payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': texto}
     if botones:
         payload['reply_markup'] = {'inline_keyboard': botones}
+    else:
+        payload['reply_markup'] = MENU_TECLADO_FIJO
     _tg_api('sendMessage', payload)
 
 
@@ -488,48 +503,30 @@ def _autorizado(chat_id):
     return TELEGRAM_CHAT_ID is not None and str(chat_id) == str(TELEGRAM_CHAT_ID)
 
 
-TEXTO_AYUDA = (
-    "🤖 COMANDOS\n\n"
-    "/ajustes — panel interactivo con botones (+/- capital, riesgo, leverage, cupos, tiempo pendiente)\n"
-    "/valores — lista de todos los valores editables\n"
-    "/set NOMBRE VALOR — cambia cualquiera manualmente (ej: /set MIN_RATIO 2.5)\n"
-    "/capital 100 · /riesgo 5 · /leverage 5 — atajos rápidos\n"
-    "/pnl — PnL real diario, semanal y mensual\n"
-    "/posiciones — operaciones abiertas y órdenes pendientes\n"
-    "/estado — resumen general del sistema\n\n"
-)
-
-
 def panel_ajustes():
     riesgo_usd = CAPITAL_DISPONIBLE * RIESGO_PCT / 100
-    tiempo_txt = "Desactivado (0 min)" if MINUTOS_MAX_ORDEN_PENDIENTE == 0 else f"{MINUTOS_MAX_ORDEN_PENDIENTE:g} min"
+    tiempo_txt = "Sin límite (0 min)" if MINUTOS_MAX_ORDEN_PENDIENTE == 0 else f"{MINUTOS_MAX_ORDEN_PENDIENTE:g} min"
+    
     texto = (
-        "⚙️ PANEL DE AJUSTES INTERACTIVO\n\n"
-        f"💰 Capital: {CAPITAL_DISPONIBLE:g} USDT\n"
-        f"⚠️ Riesgo: {RIESGO_PCT:g}% (≈ {riesgo_usd:.2f} USDT por operación)\n"
-        f"⚙️ Leverage: {LEVERAGE}x\n"
-        f"📊 Operaciones Máximas: {MAX_OPERACIONES_ABIERTAS}\n"
-        f"⏱️ Cancelar pendiente en: {tiempo_txt}\n\n"
-        "Usa los botones para ajustar los valores en tiempo real:"
+        "⚙️ VALORES ACTUALES CONFIGURADOS\n"
+        "───────────────────────────────\n"
+        f"💰 Capital Disponible: {CAPITAL_DISPONIBLE:g} USDT\n"
+        f"⚠️ Riesgo por Operación: {RIESGO_PCT:g}% (≈ {riesgo_usd:.2f} USDT)\n"
+        f"⚙️ Apalancamiento: {LEVERAGE}x\n"
+        f"📊 Operaciones Simultáneas Máx: {MAX_OPERACIONES_ABIERTAS}\n"
+        f"⏱️ Cancelar Pendiente en: {tiempo_txt}\n"
+        f"🎯 Ratio Mínimo R:R: 1:{MIN_RATIO:g}\n"
+        "───────────────────────────────\n"
+        "Toca un botón para cambiar el parámetro e ingresa el nuevo número:"
     )
+    
     botones = [
-        [{'text': '💰 Cap −50', 'callback_data': 'adj|CAPITAL_DISPONIBLE|-50'},
-         {'text': '💰 Cap −10', 'callback_data': 'adj|CAPITAL_DISPONIBLE|-10'},
-         {'text': '💰 Cap +10', 'callback_data': 'adj|CAPITAL_DISPONIBLE|10'},
-         {'text': '💰 Cap +50', 'callback_data': 'adj|CAPITAL_DISPONIBLE|50'}],
-        [{'text': '⚠️ Riesgo −5%', 'callback_data': 'adj|RIESGO_PCT|-5'},
-         {'text': '⚠️ Riesgo −1%', 'callback_data': 'adj|RIESGO_PCT|-1'},
-         {'text': '⚠️ Riesgo +1%', 'callback_data': 'adj|RIESGO_PCT|1'},
-         {'text': '⚠️ Riesgo +5%', 'callback_data': 'adj|RIESGO_PCT|5'}],
-        [{'text': '⚙️ Lev −5x', 'callback_data': 'adj|LEVERAGE|-5'},
-         {'text': '⚙️ Lev −1x', 'callback_data': 'adj|LEVERAGE|-1'},
-         {'text': '⚙️ Lev +1x', 'callback_data': 'adj|LEVERAGE|1'},
-         {'text': '⚙️ Lev +5x', 'callback_data': 'adj|LEVERAGE|5'}],
-        [{'text': '📊 Cupo −1', 'callback_data': 'adj|MAX_OPERACIONES_ABIERTAS|-1'},
-         {'text': '📊 Cupo +1', 'callback_data': 'adj|MAX_OPERACIONES_ABIERTAS|1'}],
-        [{'text': '⏱️ Tiempo −5m', 'callback_data': 'adj|MINUTOS_MAX_ORDEN_PENDIENTE|-5'},
-         {'text': '⏱️ Off (0m)', 'callback_data': 'set_val|MINUTOS_MAX_ORDEN_PENDIENTE|0'},
-         {'text': '⏱️ Tiempo +5m', 'callback_data': 'adj|MINUTOS_MAX_ORDEN_PENDIENTE|5'}],
+        [{'text': '💰 Cambiar Capital', 'callback_data': 'pedir|CAPITAL_DISPONIBLE'},
+         {'text': '⚠️ Cambiar Riesgo %', 'callback_data': 'pedir|RIESGO_PCT'}],
+        [{'text': '⚙️ Cambiar Leverage', 'callback_data': 'pedir|LEVERAGE'},
+         {'text': '📊 Cambiar Cupos Máx', 'callback_data': 'pedir|MAX_OPERACIONES_ABIERTAS'}],
+        [{'text': '⏱️ Cambiar Minutos Pendiente', 'callback_data': 'pedir|MINUTOS_MAX_ORDEN_PENDIENTE'},
+         {'text': '🎯 Cambiar Ratio Mínimo', 'callback_data': 'pedir|MIN_RATIO'}],
     ]
     return texto, botones
 
@@ -538,117 +535,47 @@ def texto_valores():
     inverso = {}
     for alias, nombre in ALIAS_AJUSTES.items():
         inverso.setdefault(nombre, alias)
-    lineas = ["📋 VALORES EDITABLES (usa /set NOMBRE VALOR)\n"]
+    lineas = ["📋 VALORES CONFIGURADOS EN SISTEMA\n"]
     for nombre, (_, _, _, desc) in AJUSTES_EDITABLES.items():
         alias = f" (alias: {inverso[nombre]})" if nombre in inverso else ""
         lineas.append(f"• {nombre} = {globals()[nombre]}{alias}\n   {desc}")
     return "\n".join(lineas)
 
 
-def _tg_set(nombre_txt, valor_txt):
-    nombre = resolver_nombre_ajuste(nombre_txt)
-    if not nombre:
-        tg_enviar(f"❌ No existe el ajuste '{nombre_txt}'. Mira /valores.")
-        return
-    tipo = AJUSTES_EDITABLES[nombre][0]
-    try:
-        valor = _convertir_valor(tipo, valor_txt)
-    except ValueError as e:
-        tg_enviar(f"❌ Valor inválido para {nombre}: {e}")
-        return
-
-    if nombre == 'EJECUTAR_ORDENES_REALES' and valor is True and not EJECUTAR_ORDENES_REALES:
-        modo = "TESTNET" if USAR_TESTNET else "BINANCE REAL (dinero real)"
-        tg_enviar(f"⚠️ Vas a activar el envío de órdenes en {modo}. ¿Confirmas?",
-                  [[{'text': '✅ Sí, activar', 'callback_data': 'conf|EJECUTAR_ORDENES_REALES|1'},
-                    {'text': '✖️ Cancelar', 'callback_data': 'conf|cancelar|0'}]])
-        return
-
-    try:
-        aplicar_ajuste(nombre, valor)
-    except ValueError as e:
-        tg_enviar(f"❌ {e}")
-        return
-    tg_enviar(f"✅ {nombre} = {globals()[nombre]}")
-
-
 def _tg_callback(cq):
     partes = cq.get('data', '').split('|')
     msg = cq.get('message') or {}
     chat_id = msg['chat']['id']
-    mid = msg['message_id']
     respuesta = ''
 
-    if partes[0] == 'adj' and len(partes) == 3 and partes[1] in AJUSTES_EDITABLES:
-        nombre = partes[1]
-        tipo = AJUSTES_EDITABLES[nombre][0]
-        nuevo = round(globals()[nombre] + float(partes[2]), 4)
-        if tipo is int:
-            nuevo = int(round(nuevo))
-        try:
-            aplicar_ajuste(nombre, nuevo)
-            respuesta = f"{nombre} = {globals()[nombre]:g}"
-        except ValueError as e:
-            respuesta = f"❌ {e}"
-        texto, botones = panel_ajustes()
-        tg_editar(chat_id, mid, texto, botones)
-
-    elif partes[0] == 'set_val' and len(partes) == 3 and partes[1] in AJUSTES_EDITABLES:
-        nombre = partes[1]
-        valor_fijo = partes[2]
-        try:
-            aplicar_ajuste(nombre, valor_fijo)
-            respuesta = f"{nombre} = {globals()[nombre]:g}"
-        except ValueError as e:
-            respuesta = f"❌ {e}"
-        texto, botones = panel_ajustes()
-        tg_editar(chat_id, mid, texto, botones)
-
-    elif partes[0] == 'conf':
-        if partes[1] == 'EJECUTAR_ORDENES_REALES' and partes[2] == '1':
-            aplicar_ajuste('EJECUTAR_ORDENES_REALES', True)
-            tg_editar(chat_id, mid, "✅ EJECUTAR_ORDENES_REALES = True.")
-            respuesta = "Activado"
-        else:
-            tg_editar(chat_id, mid, "✖️ Cancelado.")
-            respuesta = "Cancelado"
+    if partes[0] == 'pedir' and len(partes) == 2 and partes[1] in AJUSTES_EDITABLES:
+        var_nombre = partes[1]
+        USUARIO_ESPERANDO_DATO[chat_id] = var_nombre
+        
+        _, minimo, maximo, desc = AJUSTES_EDITABLES[var_nombre]
+        rango_txt = f"entre {minimo:g} y {maximo:g}" if minimo is not None and maximo is not None else ""
+        
+        tg_enviar(f"✍️ Escribe el nuevo número para:\n\n"
+                  f"👉 *{var_nombre}* ({desc})\n"
+                  f"Valor actual: {globals()[var_nombre]}\n"
+                  f"{f'Rango: {rango_txt}' if rango_txt else ''}")
+        respuesta = f"Esperando valor para {var_nombre}"
 
     _tg_api('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': respuesta[:150]})
 
 
-def _tg_comando(texto):
-    partes = texto.strip().split()
-    cmd = partes[0].split('@')[0].lower()
-    args = partes[1:]
-
-    if cmd in ('/start', '/ayuda', '/help'):
-        tg_enviar(TEXTO_AYUDA)
-    elif cmd == '/ajustes':
-        t, b = panel_ajustes()
-        tg_enviar(t, b)
-    elif cmd == '/valores':
-        tg_enviar(texto_valores())
-    elif cmd == '/set':
-        if len(args) != 2:
-            tg_enviar("Uso: /set NOMBRE VALOR")
-        else:
-            _tg_set(args[0], args[1])
-    elif cmd in ('/capital', '/riesgo', '/leverage'):
-        if len(args) != 1:
-            tg_enviar(f"Uso: {cmd} VALOR")
-        else:
-            _tg_set(cmd[1:], args[0])
-    elif cmd == '/pnl':
-        tg_enviar(texto_pnl())
-    elif cmd == '/posiciones':
-        tg_enviar(texto_posiciones())
-    elif cmd == '/estado':
-        modo = "TESTNET" if USAR_TESTNET else "BINANCE REAL"
-        tg_enviar(f"📡 ESTADO\nModo: {modo}\nEnvío de órdenes: {'ACTIVADO' if EJECUTAR_ORDENES_REALES else 'DESACTIVADO'}\n"
-                  f"Capital {CAPITAL_DISPONIBLE:g} USDT | Riesgo {RIESGO_PCT:g}% | Leverage {LEVERAGE}x\n\n"
-                  f"{texto_posiciones()}\n\n{texto_pnl()}")
-    else:
-        tg_enviar("Comando no reconocido.")
+def _tg_set_directo(nombre_txt, valor_txt):
+    nombre = resolver_nombre_ajuste(nombre_txt)
+    if not nombre:
+        tg_enviar(f"❌ No existe el parámetro '{nombre_txt}'.")
+        return
+    tipo = AJUSTES_EDITABLES[nombre][0]
+    try:
+        valor = _convertir_valor(tipo, valor_txt)
+        aplicar_ajuste(nombre, valor)
+        tg_enviar(f"✅ Guardado: {nombre} = {globals()[nombre]}")
+    except ValueError as e:
+        tg_enviar(f"❌ Error guardando el valor: {e}")
 
 
 def _tg_procesar(upd):
@@ -659,13 +586,36 @@ def _tg_procesar(upd):
             _tg_callback(cq)
         else:
             _tg_api('answerCallbackQuery', {'callback_query_id': cq['id']})
+            
     elif 'message' in upd:
         m = upd['message']
-        if not _autorizado(m['chat']['id']):
+        chat_id = m['chat']['id']
+        if not _autorizado(chat_id):
             return  
-        texto = m.get('text', '')
-        if texto.startswith('/'):
-            _tg_comando(texto)
+        texto = m.get('text', '').strip()
+
+        # Si estábamos esperando que el usuario ingresara un número tras tocar un botón
+        if chat_id in USUARIO_ESPERANDO_DATO:
+            var_nombre = USUARIO_ESPERANDO_DATO.pop(chat_id)
+            _tg_set_directo(var_nombre, texto)
+            t, b = panel_ajustes()
+            tg_enviar(t, b)
+            return
+
+        # Detección directa por los nombres de los botones fijos en pantalla
+        if texto in ('⚙️ Ajustes', '/ajustes'):
+            t, b = panel_ajustes()
+            tg_enviar(t, b)
+        elif texto in ('📌 Posiciones', '/posiciones'):
+            tg_enviar(texto_posiciones())
+        elif texto in ('📊 PnL', '/pnl'):
+            tg_enviar(texto_pnl())
+        elif texto in ('📡 Estado', '/estado'):
+            modo = "TESTNET" if USAR_TESTNET else "BINANCE REAL"
+            tg_enviar(f"📡 ESTADO DEL BOT\nModo: {modo}\n"
+                      f"Capital {CAPITAL_DISPONIBLE:g} USDT | Riesgo {RIESGO_PCT:g}% | Leverage {LEVERAGE}x\n"
+                      f"Cupos: {MAX_OPERACIONES_ABIERTAS} operaciones máx | Pendientes: {MINUTOS_MAX_ORDEN_PENDIENTE:g} min\n\n"
+                      f"{texto_posiciones()}\n\n{texto_pnl()}")
 
 
 def hilo_telegram():
@@ -688,7 +638,7 @@ def hilo_telegram():
             if not resp.get('ok'):
                 if resp.get('error_code') == 409:
                     if not aviso_409_mostrado:
-                        print("⚠️ Telegram: liberando la conexión de la corrida anterior...")
+                        print("⚠️ Telegram: liberando conexión anterior...")
                         aviso_409_mostrado = True
                 time.sleep(3)
                 continue
@@ -699,7 +649,7 @@ def hilo_telegram():
                 try:
                     _tg_procesar(upd)
                 except Exception as e:
-                    print(f"⚠️ Error procesando update: {e}")
+                    print(f"⚠️ Error procesando mensaje de Telegram: {e}")
         except Exception:
             time.sleep(5)
 
@@ -1076,8 +1026,7 @@ def escanear_perpetuos_binance():
         threading.Thread(target=hilo_monitor, args=(exchange,), daemon=True).start()
         modo = "TESTNET" if USAR_TESTNET else "BINANCE REAL"
         tg_enviar(f"🚀 Escáner iniciado ({modo})\n"
-                  f"Envío de órdenes: {'ACTIVADO' if EJECUTAR_ORDENES_REALES else 'DESACTIVADO (solo simula)'}\n"
-                  "Usa /ayuda para ver los comandos.")
+                  f"Envío de órdenes: {'ACTIVADO' if EJECUTAR_ORDENES_REALES else 'DESACTIVADO (solo simula)'}")
     else:
         print("ℹ️  TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID no configurados en config.py.")
 
@@ -1123,7 +1072,7 @@ def escanear_perpetuos_binance():
 
                     precio_ref = (bids[0][0] + asks[0][0]) / 2.0
 
-                    paso_penultimo, paso_ultimo = obtener_dos_ultimos_niveles_adaptativos(market_info, precio_ref)
+                    paso_penultimo, paso_ultimo = obtener_dos_ultimos_niveles_adaptativos(market_info, precio_referencia=precio_ref)
 
                     bids_penultimo = agrupar_libro_ordenes(bids, paso_penultimo)
                     asks_penultimo = agrupar_libro_ordenes(asks, paso_penultimo)
@@ -1206,7 +1155,7 @@ def escanear_perpetuos_binance():
                                 print(f"\n🔴 [{hora_actual}] ¡ALERTA SHORT: {symbol}!")
                                 print(f"   ▸ Pasos: Penúltimo ({paso_penultimo}) | Último ({paso_ultimo})")
                                 print(f"   ▸ Entrada (Pico Ask N1): {venta_1} USDT | Vol: {vol_v1:,.0f} {base_currency}")
-                                print(f"   ▸ TP (Pico Bid N1):      {compra_1} USDT (-{round(pct_tp_s, 2)}%) | Vol: {vol_c1:,.0f} {base_currency}")
+                                print(f"   ▸ TP (Pico Bid N1):      {compra_1} USDT (-{round(pct_tp_s, 2)}%) | Vol: {vol_v1:,.0f} {base_currency}")
                                 print(f"   ▸ SL (Pico Ask N2):      {venta_2} USDT (+{round(pct_sl_s, 2)}%) | Vol: {vol_v2:,.0f} {base_currency}")
                                 print(f"   🎯 Ratio R:R: 1:{round(ratio_short, 2)}")
 
