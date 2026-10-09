@@ -36,15 +36,16 @@ EJECUTAR_ORDENES_REALES = True    # ⚠️ En False = solo imprime lo que HARÍA
 USAR_TESTNET = False                # True = fapi Testnet (dinero de prueba). False = Binance real.
 
 ACTIVACION_TRAILING_R = 1.5        # El trailing se activa cuando el precio llega a 1.5R.
-MAX_OPERACIONES_ABIERTAS = 4       # Cuántas operaciones simultáneas permite el bot.
+MAX_OPERACIONES_ABIERTAS = 4       # Operaciones simultáneas configuradas por defecto a 4.
 SEGUNDOS_ESPERA_CUPO_LLENO = 30    # Con el cupo lleno, no escanea: solo revisa cada tantos segundos
+MINUTOS_MAX_ORDEN_PENDIENTE = 15   # Tiempo límite por defecto en minutos (0 = nunca cancela)
 
 # ------------------------------------------------------------------------------
-# RANKING DE SEÑALES (se evalúan todas al final del ciclo, no la primera que aparece)
+# RANKING DE SEÑALES
 # ------------------------------------------------------------------------------
-PESO_RATIO = 0.5             # Qué tanto pesa el ratio R:R en el score
-PESO_VOLUMEN = 0.3           # Qué tanto pesa el volumen del muro de entrada (más órdenes reales detrás)
-PESO_MOVIMIENTO_SL = 0.2     # Qué tanto pesa que el SL NO esté demasiado pegado al precio
+PESO_RATIO = 0.5             
+PESO_VOLUMEN = 0.3           
+PESO_MOVIMIENTO_SL = 0.2     
 
 try:
     from config import BINANCE_API_KEY, BINANCE_API_SECRET  # noqa: E402
@@ -58,14 +59,12 @@ except ImportError:
 
 BINANCE_FAPI_BASE = "https://testnet.binancefuture.com" if USAR_TESTNET else "https://fapi.binance.com"
 
-TZ_LOCAL = ZoneInfo("America/Bogota")   # zona horaria para "hoy/semana/mes" del PnL
-INTERVALO_MONITOR_SEG = 20              # cada cuánto revisa posiciones/órdenes el hilo de monitoreo
-MINUTOS_MAX_ORDEN_PENDIENTE = 0         # 0 = nunca cancela una entrada límite por tiempo (editable por Telegram)
+TZ_LOCAL = ZoneInfo("America/Bogota")   
+INTERVALO_MONITOR_SEG = 20              
 # ==============================================================================
 
 
 def _binance_signed_request(method, path, params, api_key, api_secret):
-    """Petición firmada HMAC-SHA256 directa a la Futures API de Binance."""
     params = dict(params)
     params['timestamp'] = int(time.time() * 1000)
     params.setdefault('recvWindow', 5000)
@@ -109,7 +108,6 @@ def calcular_trailing_protector(precio_entrada, precio_stop, activacion_r=ACTIVA
 
 
 def _es_orden_de_entrada(o):
-    """True si la orden abierta es una ENTRADA (no un SL/TP que solo reduce o cierra posición)."""
     if o.get('reduceOnly'):
         return False
     info = o.get('info') or {}
@@ -119,7 +117,7 @@ def _es_orden_de_entrada(o):
 
 
 def contar_posiciones_por_lado(exchange):
-    ocupados = {}   # simbolo -> ('long'|'short', origen)
+    ocupados = {}
     ok = True
 
     try:
@@ -136,7 +134,6 @@ def contar_posiciones_por_lado(exchange):
         ok = False
 
     try:
-        # Petición explícita pasando subType linear para Binance Futuros
         ordenes = exchange.fetch_open_orders(params={'subType': 'linear'})
         
         if not ordenes:
@@ -253,20 +250,19 @@ def validar_precision_y_notional(exchange, symbol, market_info, cantidad, precio
         return None, None, f"cantidad {cantidad_ok} por debajo del mínimo del par ({min_qty})"
     if min_notional and notional < min_notional:
         return None, None, (f"el valor de la orden ({notional:.2f} USDT) está por debajo del "
-                             f"mínimo que exige Binance para este par ({min_notional} USDT) — "
-                             f"sube CAPITAL_DISPONIBLE/RIESGO_PCT o salta este par")
+                             f"mínimo que exige Binance para este par ({min_notional} USDT)")
 
     return cantidad_ok, precio_ok, None
 
 
-PROTECCION_PENDIENTE = {}   # symbol -> datos del SL/trailing a colocar en cuanto exista la posición
+PROTECCION_PENDIENTE = {}   
 _lock_proteccion = threading.Lock()
 
 
 def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, precio_stop, calc):
     lado_entrada = 'buy' if es_long else 'sell'
     lado_cierre = 'SELL' if es_long else 'BUY'
-    simbolo_binance = market_info['id']  # ej. 'BTCUSDT'
+    simbolo_binance = market_info['id']  
     cantidad = calc['cantidad_monedas']
 
     trailing = calcular_trailing_protector(precio_entrada, precio_stop)
@@ -290,8 +286,7 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
         return False
 
     if not EJECUTAR_ORDENES_REALES:
-        print("   🔒 EJECUTAR_ORDENES_REALES=False → no se mandó ninguna orden real "
-              "(cuenta como ejecutada para que la simulación de cupo sea realista).\n")
+        print("   🔒 EJECUTAR_ORDENES_REALES=False → no se mandó ninguna orden real.\n")
         return True
 
     if not BINANCE_API_KEY or not BINANCE_API_SECRET:
@@ -330,7 +325,7 @@ def colocar_proteccion_pendiente(exchange, symbol):
     with _lock_proteccion:
         info = PROTECCION_PENDIENTE.pop(symbol, None)
     if not info:
-        return
+        return  
 
     try:
         _binance_signed_request('POST', '/fapi/v1/algoOrder', {
@@ -365,7 +360,7 @@ def colocar_proteccion_pendiente(exchange, symbol):
         tg_enviar(f"🚨 URGENTE: {symbol} tiene una posición abierta SIN protección ({e}).")
 
 
-PREFIJO_ORDEN = "esc"   # prefijo del clientOrderId de las órdenes de entrada de ESTE bot
+PREFIJO_ORDEN = "esc"   
 
 
 def _ruta(nombre):
@@ -495,37 +490,46 @@ def _autorizado(chat_id):
 
 TEXTO_AYUDA = (
     "🤖 COMANDOS\n\n"
-    "/ajustes — panel con botones (capital, riesgo, leverage)\n"
-    "/valores — todos los valores editables\n"
-    "/set NOMBRE VALOR — cambia cualquiera (ej: /set MIN_RATIO 2.5)\n"
-    "/capital 100 · /riesgo 5 · /leverage 5 — atajos\n"
+    "/ajustes — panel interactivo con botones (+/- capital, riesgo, leverage, cupos, tiempo pendiente)\n"
+    "/valores — lista de todos los valores editables\n"
+    "/set NOMBRE VALOR — cambia cualquiera manualmente (ej: /set MIN_RATIO 2.5)\n"
+    "/capital 100 · /riesgo 5 · /leverage 5 — atajos rápidos\n"
     "/pnl — PnL real diario, semanal y mensual\n"
     "/posiciones — operaciones abiertas y órdenes pendientes\n"
-    "/estado — resumen general\n\n"
+    "/estado — resumen general del sistema\n\n"
 )
 
 
 def panel_ajustes():
     riesgo_usd = CAPITAL_DISPONIBLE * RIESGO_PCT / 100
+    tiempo_txt = "Desactivado (0 min)" if MINUTOS_MAX_ORDEN_PENDIENTE == 0 else f"{MINUTOS_MAX_ORDEN_PENDIENTE:g} min"
     texto = (
-        "⚙️ AJUSTES ACTUALES\n\n"
+        "⚙️ PANEL DE AJUSTES INTERACTIVO\n\n"
         f"💰 Capital: {CAPITAL_DISPONIBLE:g} USDT\n"
         f"⚠️ Riesgo: {RIESGO_PCT:g}% (≈ {riesgo_usd:.2f} USDT por operación)\n"
-        f"⚙️ Leverage: {LEVERAGE}x\n\n"
+        f"⚙️ Leverage: {LEVERAGE}x\n"
+        f"📊 Operaciones Máximas: {MAX_OPERACIONES_ABIERTAS}\n"
+        f"⏱️ Cancelar pendiente en: {tiempo_txt}\n\n"
+        "Usa los botones para ajustar los valores en tiempo real:"
     )
     botones = [
-        [{'text': '💰 −50', 'callback_data': 'adj|CAPITAL_DISPONIBLE|-50'},
-         {'text': '💰 −10', 'callback_data': 'adj|CAPITAL_DISPONIBLE|-10'},
-         {'text': '💰 +10', 'callback_data': 'adj|CAPITAL_DISPONIBLE|10'},
-         {'text': '💰 +50', 'callback_data': 'adj|CAPITAL_DISPONIBLE|50'}],
-        [{'text': '⚠️ −5', 'callback_data': 'adj|RIESGO_PCT|-5'},
-         {'text': '⚠️ −1', 'callback_data': 'adj|RIESGO_PCT|-1'},
-         {'text': '⚠️ +1', 'callback_data': 'adj|RIESGO_PCT|1'},
-         {'text': '⚠️ +5', 'callback_data': 'adj|RIESGO_PCT|5'}],
-        [{'text': '⚙️ −5', 'callback_data': 'adj|LEVERAGE|-5'},
-         {'text': '⚙️ −1', 'callback_data': 'adj|LEVERAGE|-1'},
-         {'text': '⚙️ +1', 'callback_data': 'adj|LEVERAGE|1'},
-         {'text': '⚙️ +5', 'callback_data': 'adj|LEVERAGE|5'}],
+        [{'text': '💰 Cap −50', 'callback_data': 'adj|CAPITAL_DISPONIBLE|-50'},
+         {'text': '💰 Cap −10', 'callback_data': 'adj|CAPITAL_DISPONIBLE|-10'},
+         {'text': '💰 Cap +10', 'callback_data': 'adj|CAPITAL_DISPONIBLE|10'},
+         {'text': '💰 Cap +50', 'callback_data': 'adj|CAPITAL_DISPONIBLE|50'}],
+        [{'text': '⚠️ Riesgo −5%', 'callback_data': 'adj|RIESGO_PCT|-5'},
+         {'text': '⚠️ Riesgo −1%', 'callback_data': 'adj|RIESGO_PCT|-1'},
+         {'text': '⚠️ Riesgo +1%', 'callback_data': 'adj|RIESGO_PCT|1'},
+         {'text': '⚠️ Riesgo +5%', 'callback_data': 'adj|RIESGO_PCT|5'}],
+        [{'text': '⚙️ Lev −5x', 'callback_data': 'adj|LEVERAGE|-5'},
+         {'text': '⚙️ Lev −1x', 'callback_data': 'adj|LEVERAGE|-1'},
+         {'text': '⚙️ Lev +1x', 'callback_data': 'adj|LEVERAGE|1'},
+         {'text': '⚙️ Lev +5x', 'callback_data': 'adj|LEVERAGE|5'}],
+        [{'text': '📊 Cupo −1', 'callback_data': 'adj|MAX_OPERACIONES_ABIERTAS|-1'},
+         {'text': '📊 Cupo +1', 'callback_data': 'adj|MAX_OPERACIONES_ABIERTAS|1'}],
+        [{'text': '⏱️ Tiempo −5m', 'callback_data': 'adj|MINUTOS_MAX_ORDEN_PENDIENTE|-5'},
+         {'text': '⏱️ Off (0m)', 'callback_data': 'set_val|MINUTOS_MAX_ORDEN_PENDIENTE|0'},
+         {'text': '⏱️ Tiempo +5m', 'callback_data': 'adj|MINUTOS_MAX_ORDEN_PENDIENTE|5'}],
     ]
     return texto, botones
 
@@ -575,7 +579,7 @@ def _tg_callback(cq):
     mid = msg['message_id']
     respuesta = ''
 
-    if partes[0] == 'adj' and len(partes) == 3 and partes[1] in ('CAPITAL_DISPONIBLE', 'RIESGO_PCT', 'LEVERAGE'):
+    if partes[0] == 'adj' and len(partes) == 3 and partes[1] in AJUSTES_EDITABLES:
         nombre = partes[1]
         tipo = AJUSTES_EDITABLES[nombre][0]
         nuevo = round(globals()[nombre] + float(partes[2]), 4)
@@ -583,6 +587,17 @@ def _tg_callback(cq):
             nuevo = int(round(nuevo))
         try:
             aplicar_ajuste(nombre, nuevo)
+            respuesta = f"{nombre} = {globals()[nombre]:g}"
+        except ValueError as e:
+            respuesta = f"❌ {e}"
+        texto, botones = panel_ajustes()
+        tg_editar(chat_id, mid, texto, botones)
+
+    elif partes[0] == 'set_val' and len(partes) == 3 and partes[1] in AJUSTES_EDITABLES:
+        nombre = partes[1]
+        valor_fijo = partes[2]
+        try:
+            aplicar_ajuste(nombre, valor_fijo)
             respuesta = f"{nombre} = {globals()[nombre]:g}"
         except ValueError as e:
             respuesta = f"❌ {e}"
@@ -881,7 +896,7 @@ def hilo_monitor(exchange):
                             with _lock_proteccion:
                                 PROTECCION_PENDIENTE.pop(o['symbol'], None)
                             pendientes.remove(o)
-                            tg_enviar(f"⌛ ORDEN CANCELADA: {o['symbol']}")
+                            tg_enviar(f"⌛ ORDEN CANCELADA: {o['symbol']}\nSuperó el límite de {MINUTOS_MAX_ORDEN_PENDIENTE:g} min sin llenarse.")
             except Exception:
                 pass
 
