@@ -38,7 +38,7 @@ USAR_TESTNET = False                # True = fapi Testnet. False = Binance real.
 ACTIVACION_TRAILING_R = 1.5        # El trailing se activa cuando el precio llega a 1.5R.
 MAX_OPERACIONES_ABIERTAS = 4       # Operaciones simultáneas configuradas a 4.
 SEGUNDOS_ESPERA_CUPO_LLENO = 30    # Con el cupo lleno, no escanea
-MINUTOS_MAX_ORDEN_PENDIENTE = 15   # Tiempo límite en minutos (0 = nunca cancela)
+MINUTOS_MAX_ORDEN_PENDIENTE = 720  # Tiempo límite en minutos (720 min = 12 horas)
 
 # ------------------------------------------------------------------------------
 # RANKING DE SEÑALES
@@ -316,7 +316,7 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
             'protegido_1_1': trailing['protegido_1_1'],
             'cantidad_str': exchange.amount_to_precision(symbol, cantidad_ok),
         }
-    print(f"   ⏳ SL/Trailing quedaron pendientes: se colocan automáticamente en cuanto la entrada se llene.\n")
+    print(f"   ⏳ SL/Trailing quedaron pendientes: se colocan automáticamente.\n")
     tg_enviar(f"📥 ENTRADA ENVIADA: {symbol} {'LONG' if es_long else 'SHORT'}\n"
               f"LIMIT: {precio_ok} | Cantidad: {cantidad_ok}\n"
               f"SL/Trailing se arman solos en cuanto se llene la entrada.")
@@ -324,14 +324,30 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
     return True
 
 
-def colocar_proteccion_pendiente(exchange, symbol):
+def verificar_proteccion_activa(exchange, symbol, simbolo_binance):
+    """Verifica si el símbolo tiene activas sus órdenes condicionales de protección"""
+    try:
+        resp = _binance_signed_request('GET', '/fapi/v1/openAlgoOrders', {'symbol': simbolo_binance}, BINANCE_API_KEY, BINANCE_API_SECRET)
+        ordenes_algo = resp.get('data', []) if isinstance(resp, dict) else resp
+        tiene_sl = any(o.get('type') == 'STOP_MARKET' for o in ordenes_algo)
+        tiene_trailing = any(o.get('type') == 'TRAILING_STOP_MARKET' for o in ordenes_algo)
+        return tiene_sl and tiene_trailing
+    except Exception:
+        try:
+            resp = _binance_signed_request('GET', '/fapi/v1/openOrders', {'symbol': simbolo_binance}, BINANCE_API_KEY, BINANCE_API_SECRET)
+            return len(resp) >= 2
+        except Exception:
+            return False
+
+
+def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
     with _lock_proteccion:
-        info = PROTECCION_PENDIENTE.pop(symbol, None)
+        info = PROTECCION_PENDIENTE.get(symbol)
     if not info:
-        return  
+        return False
 
     try:
-        # 1. Coloca el STOP_MARKET clásico (con closePosition=true)
+        # 1. Coloca el STOP_MARKET clásico con CONTRACT_PRICE
         _binance_signed_request('POST', '/fapi/v1/algoOrder', {
             'algoType': 'CONDITIONAL',
             'symbol': info['simbolo_binance'],
@@ -339,11 +355,11 @@ def colocar_proteccion_pendiente(exchange, symbol):
             'type': 'STOP_MARKET',
             'triggerPrice': exchange.price_to_precision(symbol, info['precio_stop']),
             'closePosition': 'true',
-            'workingType': 'MARK_PRICE',
+            'workingType': 'CONTRACT_PRICE',
             'priceProtect': 'true',
         }, BINANCE_API_KEY, BINANCE_API_SECRET)
 
-        # 2. Coloca el TRAILING_STOP_MARKET (con cantidad explícita y reduceOnly=true)
+        # 2. Coloca el TRAILING_STOP_MARKET con CONTRACT_PRICE (evita falsos disparos)
         _binance_signed_request('POST', '/fapi/v1/algoOrder', {
             'algoType': 'CONDITIONAL',
             'symbol': info['simbolo_binance'],
@@ -352,19 +368,22 @@ def colocar_proteccion_pendiente(exchange, symbol):
             'quantity': info['cantidad_str'],
             'activationPrice': exchange.price_to_precision(symbol, info['activation_price']),
             'callbackRate': info['callback_rate'],
-            'workingType': 'MARK_PRICE',
+            'workingType': 'CONTRACT_PRICE',
             'reduceOnly': 'true',
         }, BINANCE_API_KEY, BINANCE_API_SECRET)
+
+        with _lock_proteccion:
+            PROTECCION_PENDIENTE.pop(symbol, None)
 
         print(f"   ✅ SL y Trailing colocados exitosamente para {symbol}.")
         tg_enviar(f"🎯 PROTECCIÓN ARMADA: {symbol}\n"
                   f"SL: {info['precio_stop']}\n"
                   f"Trailing → activación {info['activation_price']:.6f} "
                   f"(callback {info['callback_rate']}%, protege ≈ {info['protegido_1_1']:.6f})")
-
+        return True
     except Exception as e:
         print(f"   ⚠️  {symbol}: fallo al armar protección: {e}")
-        tg_enviar(f"🚨 URGENTE: {symbol} error al armar protección ({e}).")
+        return False
 
 
 PREFIJO_ORDEN = "esc"   
@@ -475,7 +494,6 @@ def _tg_api(metodo, payload=None, timeout=15):
         return None
 
 
-# MENÚ TECLADO FIJO EN LA PANTALLA INFERIOR
 MENU_TECLADO_FIJO = {
     'keyboard': [
         [{'text': '⚙️ Ajustes'}, {'text': '📌 Posiciones'}],
@@ -599,7 +617,6 @@ def _tg_procesar(upd):
             return  
         texto = m.get('text', '').strip()
 
-        # Si estábamos esperando que el usuario ingresara un número tras tocar un botón
         if chat_id in USUARIO_ESPERANDO_DATO:
             var_nombre = USUARIO_ESPERANDO_DATO.pop(chat_id)
             _tg_set_directo(var_nombre, texto)
@@ -607,7 +624,6 @@ def _tg_procesar(upd):
             tg_enviar(t, b)
             return
 
-        # Detección directa por los nombres de los botones fijos en pantalla
         if texto in ('⚙️ Ajustes', '/ajustes'):
             t, b = panel_ajustes()
             tg_enviar(t, b)
@@ -820,8 +836,12 @@ def hilo_monitor(exchange):
                                       'entrada': p['entrada'], 'apertura_ms': apertura, 'aprox': primera}
                     cabecera = "📌 POSICIÓN DETECTADA AL INICIAR" if primera else "🟢 OPERACIÓN ABIERTA"
                     tg_enviar(f"{cabecera}\n{sym} {str(p['lado']).upper()}\nContratos: {p['contratos']:g} | Entrada: {p['entrada']}")
-                    if EJECUTAR_ORDENES_REALES:
-                        colocar_proteccion_pendiente(exchange, sym)
+                
+                # REVISIÓN CONSTANTE EN EL HILO MONITOR: Si está abierta sin protección, se arma de inmediato
+                if EJECUTAR_ORDENES_REALES:
+                    if not verificar_proteccion_activa(exchange, sym, p['id']):
+                        print(f"   ⚠️ Posición detectada sin protección completa en {sym}. Reintentando colocar SL/Trailing...")
+                        colocar_proteccion_pendiente(exchange, sym, p['id'])
 
             for sym in list(conocidas):
                 if sym not in actuales:
@@ -1054,8 +1074,12 @@ def escanear_perpetuos_binance():
                 print(f"🟡 [{time.strftime('%H:%M:%S')}] Cupo lleno ({total_ocupado}/{MAX_OPERACIONES_ABIERTAS}): "
                       f"{', '.join(detalle) if detalle else 'sin detalle'}. "
                       f"En espera, gestionando operaciones abiertas... (revisa en {SEGUNDOS_ESPERA_CUPO_LLENO:g}s)")
+                
+                # REVISIÓN EXACTA: Mientras espera por cupo lleno, el monitor en segundo plano 
+                # (hilo_monitor cada 20s) asegura que ninguna posición abierta quede sin protección.
                 time.sleep(SEGUNDOS_ESPERA_CUPO_LLENO)
                 continue
+
             print(f"🟢 [{time.strftime('%H:%M:%S')}] Cupo {total_ocupado}/{MAX_OPERACIONES_ABIERTAS} "
                   f"(LONG {long_ocupado}, SHORT {short_ocupado}): "
                   f"{', '.join(detalle) if detalle else 'nada abierto'}. "
@@ -1161,7 +1185,7 @@ def escanear_perpetuos_binance():
                                 print(f"   ▸ Pasos: Penúltimo ({paso_penultimo}) | Último ({paso_ultimo})")
                                 print(f"   ▸ Entrada (Pico Ask N1): {venta_1} USDT | Vol: {vol_v1:,.0f} {base_currency}")
                                 print(f"   ▸ TP (Pico Bid N1):      {compra_1} USDT (-{round(pct_tp_s, 2)}%) | Vol: {vol_c1:,.0f} {base_currency}")
-                                print(f"   ▸ SL (Pico Ask N2):      {venta_2} USDT (+{round(pct_sl_s, 2)}%) | Vol: {vol_c2:,.0f} {base_currency}")
+                                print(f"   ▸ SL (Pico Ask N2):      {venta_2} USDT (+{round(pct_sl_s, 2)}%) | Vol: {vol_v2:,.0f} {base_currency}")
                                 print(f"   🎯 Ratio R:R: 1:{round(ratio_short, 2)}")
 
                                 calc = calcular_entrada(CAPITAL_DISPONIBLE, RIESGO_PCT, venta_1, venta_2, LEVERAGE)
