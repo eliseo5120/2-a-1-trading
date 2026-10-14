@@ -79,7 +79,7 @@ def _binance_signed_request(method, path, params, api_key, api_secret):
     resp = requests.request(method, url, headers=headers, timeout=10)
     data = resp.json()
     if resp.status_code != 200:
-        raise Exception(f"Binance algoOrder error {resp.status_code}: {data}")
+        raise Exception(f"Binance request error {resp.status_code}: {data}")
     return data
 
 
@@ -316,7 +316,7 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
             'protegido_1_1': trailing['protegido_1_1'],
             'cantidad_str': exchange.amount_to_precision(symbol, cantidad_ok),
         }
-    print(f"   ⏳ SL/Trailing quedaron pendientes: se colocan automáticamente.\n")
+    print(f"   ⏳ SL/Trailing quedaron pendientes: se colocan automáticamente en cuanto la entrada se llene.\n")
     tg_enviar(f"📥 ENTRADA ENVIADA: {symbol} {'LONG' if es_long else 'SHORT'}\n"
               f"LIMIT: {precio_ok} | Cantidad: {cantidad_ok}\n"
               f"SL/Trailing se arman solos en cuanto se llene la entrada.")
@@ -325,12 +325,15 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
 
 
 def verificar_proteccion_activa(exchange, symbol, simbolo_binance):
-    """Verifica si el símbolo tiene activas sus órdenes condicionales de protección"""
+    """Verifica si el símbolo ya tiene órdenes condicionales (SL y Trailing) activas"""
     try:
         resp = _binance_signed_request('GET', '/fapi/v1/openAlgoOrders', {'symbol': simbolo_binance}, BINANCE_API_KEY, BINANCE_API_SECRET)
         ordenes_algo = resp.get('data', []) if isinstance(resp, dict) else resp
         tiene_sl = any(o.get('type') == 'STOP_MARKET' for o in ordenes_algo)
-        tiene_trailing = any(o.get('type') == 'TRAILING_STOP_MARKET' for o in ordenes_algo)
+        
+        resp_std = _binance_signed_request('GET', '/fapi/v1/openOrders', {'symbol': simbolo_binance}, BINANCE_API_KEY, BINANCE_API_SECRET)
+        tiene_trailing = any(o.get('type') == 'TRAILING_STOP_MARKET' for o in resp_std)
+        
         return tiene_sl and tiene_trailing
     except Exception:
         try:
@@ -347,7 +350,7 @@ def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
         return False
 
     try:
-        # 1. Coloca el STOP_MARKET clásico con CONTRACT_PRICE
+        # 1. El Stop Loss (SL) se queda en el endpoint de AlgoOrders (condicionales)
         _binance_signed_request('POST', '/fapi/v1/algoOrder', {
             'algoType': 'CONDITIONAL',
             'symbol': info['simbolo_binance'],
@@ -359,9 +362,8 @@ def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
             'priceProtect': 'true',
         }, BINANCE_API_KEY, BINANCE_API_SECRET)
 
-        # 2. Coloca el TRAILING_STOP_MARKET con CONTRACT_PRICE (evita falsos disparos)
-        _binance_signed_request('POST', '/fapi/v1/algoOrder', {
-            'algoType': 'CONDITIONAL',
+        # 2. El Trailing Stop se manda al endpoint estándar (/fapi/v1/order) para respetar el activationPrice calculado
+        _binance_signed_request('POST', '/fapi/v1/order', {
             'symbol': info['simbolo_binance'],
             'side': info['lado_cierre'],
             'type': 'TRAILING_STOP_MARKET',
@@ -837,7 +839,7 @@ def hilo_monitor(exchange):
                     cabecera = "📌 POSICIÓN DETECTADA AL INICIAR" if primera else "🟢 OPERACIÓN ABIERTA"
                     tg_enviar(f"{cabecera}\n{sym} {str(p['lado']).upper()}\nContratos: {p['contratos']:g} | Entrada: {p['entrada']}")
                 
-                # REVISIÓN CONSTANTE EN EL HILO MONITOR: Si está abierta sin protección, se arma de inmediato
+                # REVISIÓN EN SEGUNDO PLANO: Si una posición queda sin protección completa, la reintenta colocar
                 if EJECUTAR_ORDENES_REALES:
                     if not verificar_proteccion_activa(exchange, sym, p['id']):
                         print(f"   ⚠️ Posición detectada sin protección completa en {sym}. Reintentando colocar SL/Trailing...")
@@ -1074,12 +1076,8 @@ def escanear_perpetuos_binance():
                 print(f"🟡 [{time.strftime('%H:%M:%S')}] Cupo lleno ({total_ocupado}/{MAX_OPERACIONES_ABIERTAS}): "
                       f"{', '.join(detalle) if detalle else 'sin detalle'}. "
                       f"En espera, gestionando operaciones abiertas... (revisa en {SEGUNDOS_ESPERA_CUPO_LLENO:g}s)")
-                
-                # REVISIÓN EXACTA: Mientras espera por cupo lleno, el monitor en segundo plano 
-                # (hilo_monitor cada 20s) asegura que ninguna posición abierta quede sin protección.
                 time.sleep(SEGUNDOS_ESPERA_CUPO_LLENO)
                 continue
-
             print(f"🟢 [{time.strftime('%H:%M:%S')}] Cupo {total_ocupado}/{MAX_OPERACIONES_ABIERTAS} "
                   f"(LONG {long_ocupado}, SHORT {short_ocupado}): "
                   f"{', '.join(detalle) if detalle else 'nada abierto'}. "
