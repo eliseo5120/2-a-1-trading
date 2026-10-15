@@ -325,13 +325,21 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
 
 
 def verificar_proteccion_activa(exchange, symbol, simbolo_binance):
-    """Comprueba si la posición ya cuenta con sus órdenes de protección activas"""
+    """Comprueba de forma precisa si la posición ya cuenta con sus órdenes de protección activas"""
     try:
-        resp_algo = _binance_signed_request('GET', '/fapi/v1/openAlgoOrders', {'symbol': simbolo_binance}, BINANCE_API_KEY, BINANCE_API_SECRET)
+        resp_algo = _binance_signed_request('GET', '/fapi/v1/openAlgoOrders', {}, BINANCE_API_KEY, BINANCE_API_SECRET)
         ordenes_algo = resp_algo.get('data', []) if isinstance(resp_algo, dict) else resp_algo
         
-        tiene_sl = any('STOP' in str(o.get('type')).upper() for o in ordenes_algo)
-        tiene_trailing = any('TRAILING' in str(o.get('type')).upper() for o in ordenes_algo)
+        # Limpiamos el símbolo para comparar correctamente ('1000SHIBUSDT' == '1000SHIBUSDT')
+        simbolo_limpio = simbolo_binance.replace('/', '').replace(':USDT', '')
+        
+        ordenes_del_simbolo = [
+            o for o in ordenes_algo 
+            if str(o.get('symbol', '')).replace('/', '').replace(':USDT', '') == simbolo_limpio
+        ]
+        
+        tiene_sl = any('STOP' in str(o.get('type')).upper() for o in ordenes_del_simbolo)
+        tiene_trailing = any('TRAILING' in str(o.get('type')).upper() for o in ordenes_del_simbolo)
 
         return tiene_sl and tiene_trailing
     except Exception:
@@ -387,7 +395,6 @@ def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
 
     trailing_exitoso = False
     try:
-        # Colocación limpia de TRAILING_STOP_MARKET en AlgoOrders usando activatePrice exacto
         _binance_signed_request('POST', '/fapi/v1/algoOrder', {
             'algoType': 'CONDITIONAL',
             'symbol': info['simbolo_binance'],
@@ -868,7 +875,6 @@ def hilo_monitor(exchange):
                     cabecera = "📌 POSICIÓN DETECTADA AL INICIAR" if primera else "🟢 OPERACIÓN ABIERTA"
                     tg_enviar(f"{cabecera}\n{sym} {str(p['lado']).upper()}\nContratos: {p['contratos']:g} | Entrada: {p['entrada']}")
                 
-                # REVISIÓN CONSTANTE: Coloca la protección solo si aún no existe
                 if EJECUTAR_ORDENES_REALES:
                     if not verificar_proteccion_activa(exchange, sym, p['id']):
                         print(f"   ⚠️ Posición detectada sin protección completa en {sym}. Armando SL y Trailing...")
