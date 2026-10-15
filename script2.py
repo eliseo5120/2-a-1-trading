@@ -325,20 +325,21 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
 
 
 def verificar_proteccion_activa(exchange, symbol, simbolo_binance):
-    """Verifica si el símbolo ya tiene órdenes condicionales (SL y Trailing) activas"""
+    """Verifica si el símbolo ya tiene órdenes condicionales o activas de protección"""
     try:
-        resp = _binance_signed_request('GET', '/fapi/v1/openAlgoOrders', {'symbol': simbolo_binance}, BINANCE_API_KEY, BINANCE_API_SECRET)
-        ordenes_algo = resp.get('data', []) if isinstance(resp, dict) else resp
+        resp_algo = _binance_signed_request('GET', '/fapi/v1/openAlgoOrders', {'symbol': simbolo_binance}, BINANCE_API_KEY, BINANCE_API_SECRET)
+        ordenes_algo = resp_algo.get('data', []) if isinstance(resp_algo, dict) else resp_algo
         tiene_sl = any(o.get('type') == 'STOP_MARKET' for o in ordenes_algo)
         
         resp_std = _binance_signed_request('GET', '/fapi/v1/openOrders', {'symbol': simbolo_binance}, BINANCE_API_KEY, BINANCE_API_SECRET)
         tiene_trailing = any(o.get('type') == 'TRAILING_STOP_MARKET' for o in resp_std)
+        tiene_sl_std = any(o.get('type') == 'STOP_MARKET' for o in resp_std)
         
-        return tiene_sl and tiene_trailing
+        return tiene_sl or tiene_sl_std or tiene_trailing
     except Exception:
         try:
             resp = _binance_signed_request('GET', '/fapi/v1/openOrders', {'symbol': simbolo_binance}, BINANCE_API_KEY, BINANCE_API_SECRET)
-            return len(resp) >= 2
+            return len(resp) >= 1
         except Exception:
             return False
 
@@ -349,8 +350,9 @@ def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
     if not info:
         return False
 
+    sl_exitoso = False
     try:
-        # 1. El Stop Loss (SL) se queda en el endpoint de AlgoOrders (condicionales)
+        # 1. Coloca el STOP_MARKET clásico (Stop Loss obligatorio)
         _binance_signed_request('POST', '/fapi/v1/algoOrder', {
             'algoType': 'CONDITIONAL',
             'symbol': info['simbolo_binance'],
@@ -361,8 +363,14 @@ def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
             'workingType': 'CONTRACT_PRICE',
             'priceProtect': 'true',
         }, BINANCE_API_KEY, BINANCE_API_SECRET)
+        sl_exitoso = True
+        print(f"   ✅ SL colocado correctamente para {symbol}.")
+    except Exception as e:
+        print(f"   ⚠️ Fallo al colocar STOP_MARKET principal en {symbol}: {e}")
 
-        # 2. El Trailing Stop se manda al endpoint estándar (/fapi/v1/order) para respetar el activationPrice calculado
+    trailing_exitoso = False
+    try:
+        # 2. Coloca el TRAILING_STOP_MARKET enviando tipos nativos booleanos
         _binance_signed_request('POST', '/fapi/v1/order', {
             'symbol': info['simbolo_binance'],
             'side': info['lado_cierre'],
@@ -371,21 +379,25 @@ def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
             'activationPrice': exchange.price_to_precision(symbol, info['activation_price']),
             'callbackRate': info['callback_rate'],
             'workingType': 'CONTRACT_PRICE',
-            'reduceOnly': 'true',
+            'reduceOnly': True,
         }, BINANCE_API_KEY, BINANCE_API_SECRET)
+        trailing_exitoso = True
+        print(f"   ✅ Trailing colocado correctamente para {symbol}.")
+    except Exception as e:
+        print(f"   ⚠️ Fallo al colocar TRAILING_STOP_MARKET en {symbol}: {e}")
 
+    # Si todo salió bien o al menos el SL está activo, retiramos de pendientes
+    if sl_exitoso or trailing_exitoso:
         with _lock_proteccion:
             PROTECCION_PENDIENTE.pop(symbol, None)
 
-        print(f"   ✅ SL y Trailing colocados exitosamente para {symbol}.")
         tg_enviar(f"🎯 PROTECCIÓN ARMADA: {symbol}\n"
                   f"SL: {info['precio_stop']}\n"
                   f"Trailing → activación {info['activation_price']:.6f} "
                   f"(callback {info['callback_rate']}%, protege ≈ {info['protegido_1_1']:.6f})")
         return True
-    except Exception as e:
-        print(f"   ⚠️  {symbol}: fallo al armar protección: {e}")
-        return False
+    
+    return False
 
 
 PREFIJO_ORDEN = "esc"   
@@ -839,7 +851,7 @@ def hilo_monitor(exchange):
                     cabecera = "📌 POSICIÓN DETECTADA AL INICIAR" if primera else "🟢 OPERACIÓN ABIERTA"
                     tg_enviar(f"{cabecera}\n{sym} {str(p['lado']).upper()}\nContratos: {p['contratos']:g} | Entrada: {p['entrada']}")
                 
-                # REVISIÓN EN SEGUNDO PLANO: Si una posición queda sin protección completa, la reintenta colocar
+                # REVISIÓN CONSTANTE: Si está abierta sin protección, se arma de inmediato
                 if EJECUTAR_ORDENES_REALES:
                     if not verificar_proteccion_activa(exchange, sym, p['id']):
                         print(f"   ⚠️ Posición detectada sin protección completa en {sym}. Reintentando colocar SL/Trailing...")
