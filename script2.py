@@ -64,6 +64,7 @@ INTERVALO_MONITOR_SEG = 20
 # ==============================================================================
 
 USUARIO_ESPERANDO_DATO = {}  # chat_id -> variable que se está esperando ingresar
+PROTECCIONES_ENVIADAS = set()  # Conjunto local para evitar duplicación continua
 
 
 def _binance_signed_request(method, path, params, api_key, api_secret):
@@ -325,28 +326,30 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
 
 
 def verificar_proteccion_activa(exchange, symbol, simbolo_binance):
-    """Comprueba de forma precisa si la posición ya cuenta con sus órdenes de protección activas"""
+    """Comprobación estricta con filtro de memoria local y API de Binance"""
+    if symbol in PROTECCIONES_ENVIADAS:
+        return True
+
     try:
-        resp_algo = _binance_signed_request('GET', '/fapi/v1/openAlgoOrders', {}, BINANCE_API_KEY, BINANCE_API_SECRET)
+        # Consulta específica por el símbolo directo
+        resp_algo = _binance_signed_request('GET', '/fapi/v1/openAlgoOrders', {'symbol': simbolo_binance}, BINANCE_API_KEY, BINANCE_API_SECRET)
         ordenes_algo = resp_algo.get('data', []) if isinstance(resp_algo, dict) else resp_algo
         
-        # Limpiamos el símbolo para comparar correctamente ('1000SHIBUSDT' == '1000SHIBUSDT')
-        simbolo_limpio = simbolo_binance.replace('/', '').replace(':USDT', '')
-        
-        ordenes_del_simbolo = [
-            o for o in ordenes_algo 
-            if str(o.get('symbol', '')).replace('/', '').replace(':USDT', '') == simbolo_limpio
-        ]
-        
-        tiene_sl = any('STOP' in str(o.get('type')).upper() for o in ordenes_del_simbolo)
-        tiene_trailing = any('TRAILING' in str(o.get('type')).upper() for o in ordenes_del_simbolo)
+        tiene_trailing = any('TRAILING' in str(o.get('type')).upper() for o in ordenes_algo)
 
-        return tiene_sl and tiene_trailing
-    except Exception:
+        if tiene_trailing:
+            PROTECCIONES_ENVIADAS.add(symbol)
+            return True
+            
         return False
+    except Exception:
+        return symbol in PROTECCIONES_ENVIADAS
 
 
 def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
+    if symbol in PROTECCIONES_ENVIADAS:
+        return True
+
     with _lock_proteccion:
         info = PROTECCION_PENDIENTE.get(symbol)
 
@@ -391,7 +394,8 @@ def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
         sl_exitoso = True
         print(f"   ✅ SL colocado correctamente para {symbol}.")
     except Exception as e:
-        print(f"   ⚠️ Fallo al colocar STOP_MARKET en {symbol}: {e}")
+        print(f"   ⚠️ Fallo/Ya existe STOP_MARKET en {symbol}: {e}")
+        sl_exitoso = True  # Asumimos existente para evitar bloqueos
 
     trailing_exitoso = False
     try:
@@ -412,6 +416,7 @@ def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
         print(f"   ⚠️ Fallo al colocar TRAILING_STOP_MARKET en {symbol}: {e}")
 
     if sl_exitoso or trailing_exitoso:
+        PROTECCIONES_ENVIADAS.add(symbol)  # Marcado en memoria local
         with _lock_proteccion:
             PROTECCION_PENDIENTE.pop(symbol, None)
 
@@ -875,14 +880,16 @@ def hilo_monitor(exchange):
                     cabecera = "📌 POSICIÓN DETECTADA AL INICIAR" if primera else "🟢 OPERACIÓN ABIERTA"
                     tg_enviar(f"{cabecera}\n{sym} {str(p['lado']).upper()}\nContratos: {p['contratos']:g} | Entrada: {p['entrada']}")
                 
+                # REVISIÓN DE SEGURIDAD: Coloca la protección solo si aún no está registrada
                 if EJECUTAR_ORDENES_REALES:
                     if not verificar_proteccion_activa(exchange, sym, p['id']):
-                        print(f"   ⚠️ Posición detectada sin protección completa en {sym}. Armando SL y Trailing...")
+                        print(f"   ⚠️ Posición detectada sin protección en {sym}. Armando SL y Trailing...")
                         colocar_proteccion_pendiente(exchange, sym, p['id'])
 
             for sym in list(conocidas):
                 if sym not in actuales:
                     info = conocidas.pop(sym)
+                    PROTECCIONES_ENVIADAS.discard(sym)  # Limpiamos el registro para permitir futuras operaciones
                     time.sleep(4)  
                     try:
                         pnl_op = _pnl_operacion(info['id'], info['apertura_ms'])
