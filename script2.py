@@ -79,7 +79,7 @@ def _binance_signed_request(method, path, params, api_key, api_secret):
     resp = requests.request(method, url, headers=headers, timeout=10)
     data = resp.json()
     if resp.status_code != 200:
-        raise Exception(f"Binance request error {resp.status_code}: {data}")
+        raise Exception(f"Binance algoOrder error {resp.status_code}: {data}")
     return data
 
 
@@ -325,16 +325,14 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
 
 
 def verificar_proteccion_activa(exchange, symbol, simbolo_binance):
-    """Verificación estricta: comprueba si la posición YA TIENE sus protecciones enviadas"""
+    """Verifica si el símbolo tiene activas AMBAS órdenes condicionales (SL y Trailing) en Binance"""
     try:
         resp_algo = _binance_signed_request('GET', '/fapi/v1/openAlgoOrders', {'symbol': simbolo_binance}, BINANCE_API_KEY, BINANCE_API_SECRET)
         ordenes_algo = resp_algo.get('data', []) if isinstance(resp_algo, dict) else resp_algo
+        
         tiene_sl = any(o.get('type') == 'STOP_MARKET' for o in ordenes_algo)
+        tiene_trailing = any(o.get('type') == 'TRAILING_STOP_MARKET' for o in ordenes_algo)
 
-        resp_std = _binance_signed_request('GET', '/fapi/v1/openOrders', {'symbol': simbolo_binance}, BINANCE_API_KEY, BINANCE_API_SECRET)
-        tiene_trailing = any(o.get('type') == 'TRAILING_STOP_MARKET' for o in resp_std)
-
-        # Retorna True solo si AMBAS protecciones existen en el exchange
         return tiene_sl and tiene_trailing
     except Exception:
         return False
@@ -344,7 +342,7 @@ def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
     with _lock_proteccion:
         info = PROTECCION_PENDIENTE.get(symbol)
 
-    # Si por algún motivo no estaba en la estructura local, reconstruye la información básica de la posición
+    # Si la posición está abierta pero no estaba en memoria local, reconstruye sus parámetros
     if not info and simbolo_binance:
         try:
             posiciones = exchange.fetch_positions([symbol])
@@ -353,7 +351,6 @@ def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
                 if contratos != 0:
                     lado_cierre = 'SELL' if contratos > 0 else 'BUY'
                     entrada = float(p.get('entryPrice'))
-                    # Usamos una distancia de seguridad base si no existían datos previos
                     stop_estimado = entrada * 0.98 if contratos > 0 else entrada * 1.02
                     trailing = calcular_trailing_protector(entrada, stop_estimado)
                     info = {
@@ -374,7 +371,7 @@ def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
 
     sl_exitoso = False
     try:
-        # 1. STOP_MARKET (Stop Loss condicional)
+        # 1. STOP_MARKET en AlgoOrders
         _binance_signed_request('POST', '/fapi/v1/algoOrder', {
             'algoType': 'CONDITIONAL',
             'symbol': info['simbolo_binance'],
@@ -388,12 +385,13 @@ def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
         sl_exitoso = True
         print(f"   ✅ SL colocado correctamente para {symbol}.")
     except Exception as e:
-        print(f"   ⚠️ Fallo al colocar STOP_MARKET principal en {symbol}: {e}")
+        print(f"   ⚠️ Fallo al colocar STOP_MARKET en {symbol}: {e}")
 
     trailing_exitoso = False
     try:
-        # 2. TRAILING_STOP_MARKET (Orden estándar de Binance con reduceOnly booleano)
-        _binance_signed_request('POST', '/fapi/v1/order', {
+        # 2. TRAILING_STOP_MARKET en AlgoOrders con los parámetros estrictos de Binance
+        _binance_signed_request('POST', '/fapi/v1/algoOrder', {
+            'algoType': 'CONDITIONAL',
             'symbol': info['simbolo_binance'],
             'side': info['lado_cierre'],
             'type': 'TRAILING_STOP_MARKET',
@@ -401,7 +399,7 @@ def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
             'activationPrice': exchange.price_to_precision(symbol, info['activation_price']),
             'callbackRate': info['callback_rate'],
             'workingType': 'CONTRACT_PRICE',
-            'reduceOnly': True,
+            'reduceOnly': 'true',
         }, BINANCE_API_KEY, BINANCE_API_SECRET)
         trailing_exitoso = True
         print(f"   ✅ Trailing colocado correctamente para {symbol}.")
@@ -872,7 +870,7 @@ def hilo_monitor(exchange):
                     cabecera = "📌 POSICIÓN DETECTADA AL INICIAR" if primera else "🟢 OPERACIÓN ABIERTA"
                     tg_enviar(f"{cabecera}\n{sym} {str(p['lado']).upper()}\nContratos: {p['contratos']:g} | Entrada: {p['entrada']}")
                 
-                # REVISIÓN CONSTANTE: Si la posición está abierta sin ambas protecciones, fuerza su colocación
+                # REVISIÓN CONSTANTE CADA 20s: Si la posición está abierta sin ambas protecciones, fuerza su colocación
                 if EJECUTAR_ORDENES_REALES:
                     if not verificar_proteccion_activa(exchange, sym, p['id']):
                         print(f"   ⚠️ Posición detectada sin protección completa en {sym}. Armando SL y Trailing...")
