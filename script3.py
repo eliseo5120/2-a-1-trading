@@ -94,7 +94,7 @@ def _binance_signed_request(method, path, params, api_key, api_secret):
 
 
 # ==============================================================================
-# FILTRO SMA
+# FILTRO SMA (Mantiene la estructura original del bot intacta)
 # ==============================================================================
 def validar_filtro_sma(exchange, symbol, es_long, precio_actual):
     if not USAR_FILTRO_SMA:
@@ -428,7 +428,6 @@ def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
 
     sl_exitoso = False
     try:
-        # Se utiliza timeInForce: GTC para la orden condicional de Stop Market
         _binance_signed_request('POST', '/fapi/v1/algoOrder', {
             'algoType': 'CONDITIONAL',
             'symbol': info['simbolo_binance'],
@@ -437,7 +436,6 @@ def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
             'triggerPrice': exchange.price_to_precision(symbol, info['precio_stop']),
             'quantity': info['cantidad_str'],
             'reduceOnly': 'true',
-            'timeInForce': 'GTC',
             'workingType': 'CONTRACT_PRICE',
             'priceProtect': 'true',
         }, BINANCE_API_KEY, BINANCE_API_SECRET)
@@ -1269,7 +1267,7 @@ def escanear_perpetuos_binance():
                                 alerta_encontrada = True
 
                     # ==========================================
-                    # EVALUACIÓN SHORT
+                    # EVALUACIÓN SHORT (Lógica original intacta)
                     # ==========================================
                     if venta_2 and venta_2 > venta_1:
                         distancia_tp_s = venta_1 - compra_1
