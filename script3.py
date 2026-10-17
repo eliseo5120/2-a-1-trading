@@ -76,12 +76,6 @@ USUARIO_ESPERANDO_DATO = {}  # chat_id -> variable que se está esperando ingres
 PROTECCIONES_ENVIADAS = set()  # Conjunto local para evitar duplicación continua
 
 
-def _limpiar_simbolo(sym):
-    if not sym:
-        return ""
-    return str(sym).replace('/', '').replace(':USDT', '').replace('USDT', '') + 'USDT'
-
-
 def _binance_signed_request(method, path, params, api_key, api_secret):
     params = dict(params)
     params['timestamp'] = int(time.time() * 1000)
@@ -100,7 +94,7 @@ def _binance_signed_request(method, path, params, api_key, api_secret):
 
 
 # ==============================================================================
-# FILTRO DE TENDENCIA Y DISTANCIA SMA
+# FILTRO SMA (INTEGRADO LIMPIAMENTE)
 # ==============================================================================
 def validar_filtro_sma(exchange, symbol, es_long, precio_actual):
     if not USAR_FILTRO_SMA:
@@ -186,8 +180,7 @@ def contar_posiciones_por_lado(exchange):
             lado = p.get('side')
             if lado not in ('long', 'short'):
                 lado = 'long' if float(contratos) > 0 else 'short'
-            sym_clean = _limpiar_simbolo(p.get('symbol'))
-            ocupados[sym_clean] = (lado, 'posición abierta')
+            ocupados[p.get('symbol')] = (lado, 'posición abierta')
     except Exception as e:
         print(f"⚠️ No se pudo consultar fetch_positions() para el cupo ({e}). Por seguridad, se asume cupo LLENO.")
         ok = False
@@ -205,13 +198,17 @@ def contar_posiciones_por_lado(exchange):
             if not _es_orden_de_entrada(o):
                 continue
             
-            sym_clean = _limpiar_simbolo(o.get('symbol'))
-            if sym_clean in ocupados:
+            sym = o.get('symbol')
+            if sym and '/' not in sym and 'USDT' in sym:
+                base = sym.replace('USDT', '')
+                sym = f"{base}/USDT:USDT"
+
+            if sym in ocupados:
                 continue
             
             side_raw = str(o.get('side')).lower()
             lado = 'long' if side_raw in ('buy', 'long') else 'short'
-            ocupados[sym_clean] = (lado, 'orden de entrada pendiente')
+            ocupados[sym] = (lado, 'orden de entrada pendiente')
 
     except Exception as e:
         print(f"⚠️ No se pudo consultar las órdenes pendientes para el cupo ({e}). Por seguridad, se asume cupo LLENO.")
@@ -264,14 +261,12 @@ def hay_cupo(total_ocupado, long_ocupado, short_ocupado, es_long):
 
 
 def tiene_posicion_u_orden_abierta(exchange, symbol):
-    sym_clean = _limpiar_simbolo(symbol)
     try:
-        posiciones = exchange.fetch_positions()
+        posiciones = exchange.fetch_positions([symbol])
         for p in posiciones:
-            if _limpiar_simbolo(p.get('symbol')) == sym_clean:
-                contratos = p.get('contracts') or 0
-                if contratos and float(contratos) != 0:
-                    return True
+            contratos = p.get('contracts') or 0
+            if contratos and float(contratos) != 0:
+                return True
     except Exception as e:
         print(f"⚠️ No se pudo verificar posición en {symbol} ({e}). Por seguridad, se omite esta candidata.")
         return True
@@ -361,9 +356,8 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
         tg_enviar(f"❌ ERROR mandando entrada en {symbol}: {e}")
         return False
 
-    sym_clean = _limpiar_simbolo(symbol)
     with _lock_proteccion:
-        PROTECCION_PENDIENTE[sym_clean] = {
+        PROTECCION_PENDIENTE[symbol] = {
             'simbolo_binance': simbolo_binance,
             'lado_cierre': lado_cierre,
             'precio_stop': precio_stop,
@@ -373,7 +367,7 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
             'cantidad_str': exchange.amount_to_precision(symbol, cantidad_ok),
         }
     print(f"   ⏳ SL/Trailing quedaron pendientes: se colocan automáticamente en cuanto la entrada se llene.\n")
-    tg_enviar(f"📥 ENTRADA ENVIADA: {sym_clean} {'LONG' if es_long else 'SHORT'}\n"
+    tg_enviar(f"📥 ENTRADA ENVIADA: {symbol} {'LONG' if es_long else 'SHORT'}\n"
               f"LIMIT: {precio_ok} | Cantidad: {cantidad_ok}\n"
               f"SL/Trailing se arman solos en cuanto se llene la entrada.")
 
@@ -381,8 +375,8 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
 
 
 def verificar_proteccion_activa(exchange, symbol, simbolo_binance):
-    sym_clean = _limpiar_simbolo(symbol)
-    if sym_clean in PROTECCIONES_ENVIADAS:
+    """Comprobación estricta con filtro de memoria local y API de Binance"""
+    if symbol in PROTECCIONES_ENVIADAS:
         return True
 
     try:
@@ -392,43 +386,41 @@ def verificar_proteccion_activa(exchange, symbol, simbolo_binance):
         tiene_trailing = any('TRAILING' in str(o.get('type')).upper() for o in ordenes_algo)
 
         if tiene_trailing:
-            PROTECCIONES_ENVIADAS.add(sym_clean)
+            PROTECCIONES_ENVIADAS.add(symbol)
             return True
             
         return False
     except Exception:
-        return sym_clean in PROTECCIONES_ENVIADAS
+        return symbol in PROTECCIONES_ENVIADAS
 
 
 def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
-    sym_clean = _limpiar_simbolo(symbol)
-    if sym_clean in PROTECCIONES_ENVIADAS:
+    if symbol in PROTECCIONES_ENVIADAS:
         return True
 
     with _lock_proteccion:
-        info = PROTECCION_PENDIENTE.get(sym_clean)
+        info = PROTECCION_PENDIENTE.get(symbol)
 
     if not info and simbolo_binance:
         try:
-            posiciones = exchange.fetch_positions()
+            posiciones = exchange.fetch_positions([symbol])
             for p in posiciones:
-                if _limpiar_simbolo(p.get('symbol')) == sym_clean:
-                    contratos = float(p.get('contracts') or 0)
-                    if contratos != 0:
-                        lado_cierre = 'SELL' if contratos > 0 else 'BUY'
-                        entrada = float(p.get('entryPrice'))
-                        stop_estimado = entrada * 0.98 if contratos > 0 else entrada * 1.02
-                        trailing = calcular_trailing_protector(entrada, stop_estimado)
-                        info = {
-                            'simbolo_binance': simbolo_binance,
-                            'lado_cierre': lado_cierre,
-                            'precio_stop': stop_estimado,
-                            'activation_price': trailing['activation_price'],
-                            'callback_rate': trailing['callback_rate_pct_ajustado'],
-                            'protegido_1_1': trailing['protegido_1_1'],
-                            'cantidad_str': exchange.amount_to_precision(symbol, abs(contratos)),
-                        }
-                        break
+                contratos = float(p.get('contracts') or 0)
+                if contratos != 0:
+                    lado_cierre = 'SELL' if contratos > 0 else 'BUY'
+                    entrada = float(p.get('entryPrice'))
+                    stop_estimado = entrada * 0.98 if contratos > 0 else entrada * 1.02
+                    trailing = calcular_trailing_protector(entrada, stop_estimado)
+                    info = {
+                        'simbolo_binance': simbolo_binance,
+                        'lado_cierre': lado_cierre,
+                        'precio_stop': stop_estimado,
+                        'activation_price': trailing['activation_price'],
+                        'callback_rate': trailing['callback_rate_pct_ajustado'],
+                        'protegido_1_1': trailing['protegido_1_1'],
+                        'cantidad_str': exchange.amount_to_precision(symbol, abs(contratos)),
+                    }
+                    break
         except Exception as e:
             print(f"   ⚠️ No se pudo auto-reconstruir información de protección para {symbol}: {e}")
 
@@ -443,16 +435,15 @@ def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
             'side': info['lado_cierre'],
             'type': 'STOP_MARKET',
             'triggerPrice': exchange.price_to_precision(symbol, info['precio_stop']),
-            'quantity': info['cantidad_str'],
-            'reduceOnly': 'true',
+            'closePosition': 'true',
             'workingType': 'CONTRACT_PRICE',
             'priceProtect': 'true',
         }, BINANCE_API_KEY, BINANCE_API_SECRET)
         sl_exitoso = True
-        print(f"   ✅ SL colocado correctamente para {sym_clean}.")
+        print(f"   ✅ SL colocado correctamente para {symbol}.")
     except Exception as e:
-        print(f"   ⚠️ Fallo/Ya existe STOP_MARKET en {sym_clean}: {e}")
-        sl_exitoso = True
+        print(f"   ⚠️ Fallo/Ya existe STOP_MARKET en {symbol}: {e}")
+        sl_exitoso = True  # Asumimos existente para evitar bloqueos
 
     trailing_exitoso = False
     try:
@@ -468,16 +459,16 @@ def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
             'reduceOnly': 'true',
         }, BINANCE_API_KEY, BINANCE_API_SECRET)
         trailing_exitoso = True
-        print(f"   ✅ Trailing colocado correctamente para {sym_clean}.")
+        print(f"   ✅ Trailing colocado correctamente para {symbol}.")
     except Exception as e:
-        print(f"   ⚠️ Fallo al colocar TRAILING_STOP_MARKET en {sym_clean}: {e}")
+        print(f"   ⚠️ Fallo al colocar TRAILING_STOP_MARKET en {symbol}: {e}")
 
     if sl_exitoso or trailing_exitoso:
-        PROTECCIONES_ENVIADAS.add(sym_clean)
+        PROTECCIONES_ENVIADAS.add(symbol)  # Marcado en memoria local
         with _lock_proteccion:
-            PROTECCION_PENDIENTE.pop(sym_clean, None)
+            PROTECCION_PENDIENTE.pop(symbol, None)
 
-        tg_enviar(f"🎯 PROTECCIÓN ARMADA: {sym_clean}\n"
+        tg_enviar(f"🎯 PROTECCIÓN ARMADA: {symbol}\n"
                   f"SL: {info['precio_stop']}\n"
                   f"Trailing → activación {info['activation_price']:.6f} "
                   f"(callback {info['callback_rate']}%, protege ≈ {info['protegido_1_1']:.6f})")
@@ -496,9 +487,6 @@ def _ruta(nombre):
 ARCHIVO_AJUSTES = _ruta("ajustes_bot.json")   
 ARCHIVO_ESTADO = _ruta("estado_bot.json")     
 
-# ==============================================================================
-# GESTIÓN Y MODIFICACIÓN DE PARÁMETROS DESDE TELEGRAM
-# ==============================================================================
 AJUSTES_EDITABLES = {
     'CAPITAL_DISPONIBLE': (float, 1, 1_000_000, "Capital disponible (USDT)"),
     'RIESGO_PCT': (float, 0.1, 50, "% del capital que se arriesga por operación"),
@@ -648,7 +636,7 @@ def panel_ajustes():
         f"📈 Filtro SMA (20/200): {'ACTIVADO' if USAR_FILTRO_SMA else 'DESACTIVADO'}\n"
         f"📐 Distancia Mínima a SMA20: {DISTANCIA_MIN_PORCENTAJE:g}%\n"
         "───────────────────────────────\n"
-        "Toca un botón para cambiar el parámetro e ingresa el nuevo número (o escribe p.ej: 'sma true' / 'distancia 2.5'):"
+        "Toca un botón para cambiar el parámetro e ingresa el nuevo número:"
     )
     
     botones = [
@@ -660,6 +648,17 @@ def panel_ajustes():
          {'text': '📈 Filtro SMA True/False', 'callback_data': 'pedir|USAR_FILTRO_SMA'}],
     ]
     return texto, botones
+
+
+def texto_valores():
+    inverso = {}
+    for alias, nombre in ALIAS_AJUSTES.items():
+        inverso.setdefault(nombre, alias)
+    lineas = ["📋 VALORES CONFIGURADOS EN SISTEMA\n"]
+    for nombre, (_, _, _, desc) in AJUSTES_EDITABLES.items():
+        alias = f" (alias: {inverso[nombre]})" if nombre in inverso else ""
+        lineas.append(f"• {nombre} = {globals()[nombre]}{alias}\n   {desc}")
+    return "\n".join(lineas)
 
 
 def _tg_callback(cq):
@@ -675,7 +674,7 @@ def _tg_callback(cq):
         _, minimo, maximo, desc = AJUSTES_EDITABLES[var_nombre]
         rango_txt = f"entre {minimo:g} y {maximo:g}" if minimo is not None and maximo is not None else ""
         
-        tg_enviar(f"✍️ Escribe el nuevo valor para:\n\n"
+        tg_enviar(f"✍️ Escribe el nuevo número para:\n\n"
                   f"👉 *{var_nombre}* ({desc})\n"
                   f"Valor actual: {globals()[var_nombre]}\n"
                   f"{f'Rango: {rango_txt}' if rango_txt else ''}")
@@ -721,13 +720,6 @@ def _tg_procesar(upd):
             tg_enviar(t, b)
             return
 
-        partes_comando = texto.split()
-        if len(partes_comando) == 2:
-            param, val = partes_comando[0], partes_comando[1]
-            if resolver_nombre_ajuste(param):
-                _tg_set_directo(param, val)
-                return
-
         if texto in ('⚙️ Ajustes', '/ajustes'):
             t, b = panel_ajustes()
             tg_enviar(t, b)
@@ -739,6 +731,7 @@ def _tg_procesar(upd):
             modo = "TESTNET" if USAR_TESTNET else "BINANCE REAL"
             tg_enviar(f"📡 ESTADO DEL BOT\nModo: {modo}\n"
                       f"Capital {CAPITAL_DISPONIBLE:g} USDT | Riesgo {RIESGO_PCT:g}% | Leverage {LEVERAGE}x\n"
+                      f"Cupos: {MAX_OPERACIONES_ABIERTAS} operaciones máx | Pendientes: {MINUTOS_MAX_ORDEN_PENDIENTE:g} min\n"
                       f"Filtro SMA: {'ON' if USAR_FILTRO_SMA else 'OFF'} ({DISTANCIA_MIN_PORCENTAJE:g}% dist min)\n\n"
                       f"{texto_posiciones()}\n\n{texto_pnl()}")
 
@@ -870,11 +863,11 @@ def _leer_posiciones(exchange):
             contratos = 0.0
         if contratos == 0:
             continue
-        sym_clean = _limpiar_simbolo(p.get('symbol'))
+        sym = p.get('symbol')
         info = p.get('info') or {}
-        res[sym_clean] = {
-            'symbol': sym_clean,
-            'id': info.get('symbol') or sym_clean,
+        res[sym] = {
+            'symbol': sym,
+            'id': info.get('symbol') or exchange.market(sym)['id'],
             'lado': p.get('side') or ('long' if contratos > 0 else 'short'),
             'contratos': abs(contratos),
             'entrada': p.get('entryPrice'),
@@ -941,6 +934,7 @@ def hilo_monitor(exchange):
                     cabecera = "📌 POSICIÓN DETECTADA AL INICIAR" if primera else "🟢 OPERACIÓN ABIERTA"
                     tg_enviar(f"{cabecera}\n{sym} {str(p['lado']).upper()}\nContratos: {p['contratos']:g} | Entrada: {p['entrada']}")
                 
+                # REVISIÓN DE SEGURIDAD: Coloca la protección solo si aún no está registrada
                 if EJECUTAR_ORDENES_REALES:
                     if not verificar_proteccion_activa(exchange, sym, p['id']):
                         print(f"   ⚠️ Posición detectada sin protección en {sym}. Armando SL y Trailing...")
@@ -949,7 +943,7 @@ def hilo_monitor(exchange):
             for sym in list(conocidas):
                 if sym not in actuales:
                     info = conocidas.pop(sym)
-                    PROTECCIONES_ENVIADAS.discard(sym)
+                    PROTECCIONES_ENVIADAS.discard(sym)  # Limpiamos el registro para permitir futuras operaciones
                     time.sleep(4)  
                     try:
                         pnl_op = _pnl_operacion(info['id'], info['apertura_ms'])
@@ -969,11 +963,11 @@ def hilo_monitor(exchange):
                 if MINUTOS_MAX_ORDEN_PENDIENTE > 0:
                     for o in list(pendientes):
                         edad_min = (ahora_ms - (o.get('timestamp') or ahora_ms)) / 60000
-                        if edad_min >= MINUTOS_MAX_ORDEN_PENDIENTE and _limpiar_simbolo(o['symbol']) not in actuales:
+                        if edad_min >= MINUTOS_MAX_ORDEN_PENDIENTE and o['symbol'] not in actuales:
                             exchange.cancel_order(o['id'], o['symbol'])
-                            limpiar_ordenes_simbolo(exchange, o['symbol'], _limpiar_simbolo(o['symbol']))
+                            limpiar_ordenes_simbolo(exchange, o['symbol'], exchange.market(o['symbol'])['id'])
                             with _lock_proteccion:
-                                PROTECCION_PENDIENTE.pop(_limpiar_simbolo(o['symbol']), None)
+                                PROTECCION_PENDIENTE.pop(o['symbol'], None)
                             pendientes.remove(o)
                             tg_enviar(f"⌛ ORDEN CANCELADA: {o['symbol']}\nSuperó el límite de {MINUTOS_MAX_ORDEN_PENDIENTE:g} min sin llenarse.")
             except Exception:
@@ -1234,7 +1228,7 @@ def escanear_perpetuos_binance():
                         if distancia_sl > 0:
                             ratio_long = distancia_tp / distancia_sl
                             if ratio_long >= MIN_RATIO:
-                                # EVALUACIÓN CON FILTRO SMA
+                                # APLICACIÓN DEL FILTRO SMA
                                 ok_sma, msg_sma = validar_filtro_sma(exchange, symbol, es_long=True, precio_actual=compra_1)
                                 if not ok_sma:
                                     continue
@@ -1284,7 +1278,7 @@ def escanear_perpetuos_binance():
                         if distancia_sl_s > 0:
                             ratio_short = distancia_tp_s / distancia_sl_s
                             if ratio_short >= MIN_RATIO:
-                                # EVALUACIÓN CON FILTRO SMA
+                                # APLICACIÓN DEL FILTRO SMA
                                 ok_sma, msg_sma = validar_filtro_sma(exchange, symbol, es_long=False, precio_actual=venta_1)
                                 if not ok_sma:
                                     continue
@@ -1331,7 +1325,7 @@ def escanear_perpetuos_binance():
 
             hora_fin = time.strftime('%H:%M:%S')
             if not alerta_encontrada:
-                print(f"⏳ [{hora_fin}] Ciclo finalizado sin señales que superen el criterio R:R y filtro SMA.")
+                print(f"⏳ [{hora_fin}] Ciclo finalizado sin señales que superen el criterio 1:{MIN_RATIO} y filtro SMA.")
             else:
                 candidatas_ordenadas = ordenar_candidatas_por_score(señales_candidatas)
                 print(f"\n📊 [{hora_fin}] Ciclo finalizado con {len(candidatas_ordenadas)} candidata(s), evaluando por score...")
