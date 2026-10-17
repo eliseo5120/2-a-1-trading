@@ -94,7 +94,7 @@ def _binance_signed_request(method, path, params, api_key, api_secret):
 
 
 # ==============================================================================
-# FILTRO SMA (INTEGRADO LIMPIAMENTE)
+# FILTRO SMA
 # ==============================================================================
 def validar_filtro_sma(exchange, symbol, es_long, precio_actual):
     if not USAR_FILTRO_SMA:
@@ -375,7 +375,6 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
 
 
 def verificar_proteccion_activa(exchange, symbol, simbolo_binance):
-    """Comprobación estricta con filtro de memoria local y API de Binance"""
     if symbol in PROTECCIONES_ENVIADAS:
         return True
 
@@ -383,9 +382,9 @@ def verificar_proteccion_activa(exchange, symbol, simbolo_binance):
         resp_algo = _binance_signed_request('GET', '/fapi/v1/openAlgoOrders', {'symbol': simbolo_binance}, BINANCE_API_KEY, BINANCE_API_SECRET)
         ordenes_algo = resp_algo.get('data', []) if isinstance(resp_algo, dict) else resp_algo
         
-        tiene_trailing = any('TRAILING' in str(o.get('type')).upper() for o in ordenes_algo)
+        tiene_algo = len(ordenes_algo) > 0
 
-        if tiene_trailing:
+        if tiene_algo:
             PROTECCIONES_ENVIADAS.add(symbol)
             return True
             
@@ -429,13 +428,16 @@ def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
 
     sl_exitoso = False
     try:
+        # Se utiliza timeInForce: GTC para la orden condicional de Stop Market
         _binance_signed_request('POST', '/fapi/v1/algoOrder', {
             'algoType': 'CONDITIONAL',
             'symbol': info['simbolo_binance'],
             'side': info['lado_cierre'],
             'type': 'STOP_MARKET',
             'triggerPrice': exchange.price_to_precision(symbol, info['precio_stop']),
-            'closePosition': 'true',
+            'quantity': info['cantidad_str'],
+            'reduceOnly': 'true',
+            'timeInForce': 'GTC',
             'workingType': 'CONTRACT_PRICE',
             'priceProtect': 'true',
         }, BINANCE_API_KEY, BINANCE_API_SECRET)
@@ -443,7 +445,7 @@ def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
         print(f"   ✅ SL colocado correctamente para {symbol}.")
     except Exception as e:
         print(f"   ⚠️ Fallo/Ya existe STOP_MARKET en {symbol}: {e}")
-        sl_exitoso = True  # Asumimos existente para evitar bloqueos
+        sl_exitoso = True
 
     trailing_exitoso = False
     try:
@@ -464,7 +466,7 @@ def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
         print(f"   ⚠️ Fallo al colocar TRAILING_STOP_MARKET en {symbol}: {e}")
 
     if sl_exitoso or trailing_exitoso:
-        PROTECCIONES_ENVIADAS.add(symbol)  # Marcado en memoria local
+        PROTECCIONES_ENVIADAS.add(symbol)
         with _lock_proteccion:
             PROTECCION_PENDIENTE.pop(symbol, None)
 
@@ -934,7 +936,6 @@ def hilo_monitor(exchange):
                     cabecera = "📌 POSICIÓN DETECTADA AL INICIAR" if primera else "🟢 OPERACIÓN ABIERTA"
                     tg_enviar(f"{cabecera}\n{sym} {str(p['lado']).upper()}\nContratos: {p['contratos']:g} | Entrada: {p['entrada']}")
                 
-                # REVISIÓN DE SEGURIDAD: Coloca la protección solo si aún no está registrada
                 if EJECUTAR_ORDENES_REALES:
                     if not verificar_proteccion_activa(exchange, sym, p['id']):
                         print(f"   ⚠️ Posición detectada sin protección en {sym}. Armando SL y Trailing...")
@@ -943,7 +944,7 @@ def hilo_monitor(exchange):
             for sym in list(conocidas):
                 if sym not in actuales:
                     info = conocidas.pop(sym)
-                    PROTECCIONES_ENVIADAS.discard(sym)  # Limpiamos el registro para permitir futuras operaciones
+                    PROTECCIONES_ENVIADAS.discard(sym)
                     time.sleep(4)  
                     try:
                         pnl_op = _pnl_operacion(info['id'], info['apertura_ms'])
@@ -1228,7 +1229,6 @@ def escanear_perpetuos_binance():
                         if distancia_sl > 0:
                             ratio_long = distancia_tp / distancia_sl
                             if ratio_long >= MIN_RATIO:
-                                # APLICACIÓN DEL FILTRO SMA
                                 ok_sma, msg_sma = validar_filtro_sma(exchange, symbol, es_long=True, precio_actual=compra_1)
                                 if not ok_sma:
                                     continue
@@ -1278,7 +1278,6 @@ def escanear_perpetuos_binance():
                         if distancia_sl_s > 0:
                             ratio_short = distancia_tp_s / distancia_sl_s
                             if ratio_short >= MIN_RATIO:
-                                # APLICACIÓN DEL FILTRO SMA
                                 ok_sma, msg_sma = validar_filtro_sma(exchange, symbol, es_long=False, precio_actual=venta_1)
                                 if not ok_sma:
                                     continue
