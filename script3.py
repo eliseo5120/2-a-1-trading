@@ -93,8 +93,10 @@ def _binance_signed_request(method, path, params, api_key, api_secret):
     return data
 
 
+# ==============================================================================
+# NUEVO FILTRO SMA
+# ==============================================================================
 def validar_filtro_sma(exchange, symbol, es_long, precio_actual):
-    """Valida la distancia a la SMA 20, la estructura de la SMA 200 y descarta zona muerta"""
     if not USAR_FILTRO_SMA:
         return True, "Filtro SMA desactivado"
     
@@ -120,13 +122,11 @@ def validar_filtro_sma(exchange, symbol, es_long, precio_actual):
         
         # 3. ESTRUCTURA DE MEDIAS Y PRECIO
         if es_long:
-            # LONG: Precio por debajo de SMA 20 y SMA 20 por debajo de SMA 200
             if precio_actual < sma_20 and sma_20 < sma_200:
                 return True, f"LONG verificado | Distancia SMA20: {distancia_pct:.2f}%"
             else:
                 return False, f"LONG rechazado: No cumple estructura (Precio < SMA20 < SMA200)"
         else:
-            # SHORT: Precio por encima de SMA 20 y SMA 20 por encima de SMA 200
             if precio_actual > sma_20 and sma_20 > sma_200:
                 return True, f"SHORT verificado | Distancia SMA20: {distancia_pct:.2f}%"
             else:
@@ -1217,7 +1217,7 @@ def escanear_perpetuos_binance():
                         if distancia_sl > 0:
                             ratio_long = distancia_tp / distancia_sl
                             if ratio_long >= MIN_RATIO:
-                                # FILTRO DE MEDIAS MÓVILES (SMA 20/200)
+                                # APLICACIÓN DEL FILTRO SMA
                                 ok_sma, msg_sma = validar_filtro_sma(exchange, symbol, es_long=True, precio_actual=compra_1)
                                 if not ok_sma:
                                     continue
@@ -1267,7 +1267,7 @@ def escanear_perpetuos_binance():
                         if distancia_sl_s > 0:
                             ratio_short = distancia_tp_s / distancia_sl_s
                             if ratio_short >= MIN_RATIO:
-                                # FILTRO DE MEDIAS MÓVILES (SMA 20/200)
+                                # APLICACIÓN DEL FILTRO SMA
                                 ok_sma, msg_sma = validar_filtro_sma(exchange, symbol, es_long=False, precio_actual=venta_1)
                                 if not ok_sma:
                                     continue
@@ -1281,7 +1281,7 @@ def escanear_perpetuos_binance():
                                 print(f"   ▸ Pasos: Penúltimo ({paso_penultimo}) | Último ({paso_ultimo})")
                                 print(f"   ▸ Entrada (Pico Ask N1): {venta_1} USDT | Vol: {vol_v1:,.0f} {base_currency}")
                                 print(f"   ▸ TP (Pico Bid N1):      {compra_1} USDT (-{round(pct_tp_s, 2)}%) | Vol: {vol_c1:,.0f} {base_currency}")
-                                print(f"   ▸ SL (Pico Ask N2):      {venta_2} USDT (+{round(pct_sl_s, 2)}%) | Vol: {vol_v2:,.0f} {base_currency}")
+                                print(f"   ▸ SL (Pico Ask N2):      {venta_2} USDT (+{round(pct_sl_s, 2)}%) | Vol: {vol_c2:,.0f} {base_currency}")
                                 print(f"   🎯 Ratio R:R: 1:{round(ratio_short, 2)}")
 
                                 calc = calcular_entrada(CAPITAL_DISPONIBLE, RIESGO_PCT, venta_1, venta_2, LEVERAGE)
