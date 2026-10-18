@@ -22,13 +22,14 @@ PAUSA_ENTRE_PARES_SEG = 0.04      # Pausa entre pares en segundos
 PAUSA_ERROR_RED_SEG = 10          # Pausa si se cae la red
 
 # ------------------------------------------------------------------------------
-# FILTRO DE TENDENCIA Y DISTANCIA CON MEDIAS MÓVILES (SMA 20 y SMA 200)
+# FILTRO DE TENDENCIA, DISTANCIA Y VOLUMEN
 # ------------------------------------------------------------------------------
 USAR_FILTRO_SMA = True            # True = Filtra con SMA, False = Ignora filtro SMA
 SMA_CORTA_PERIODO = 20            # Periodo SMA corta
 SMA_LARGA_PERIODO = 200           # Periodo SMA larga
-DISTANCIA_MIN_PORCENTAJE = 2.0    # % Mínimo de distancia entre el precio y la SMA 20
+DISTANCIA_MIN_PORCENTAJE = 2.0    # % Mínimo de distancia obligatoria a las SMA
 TIMEFRAME_SMA = '1h'              # Temporalidad para calcular las SMA ('15m', '1h', etc.)
+VOLUMEN_MINIMO_24H_USDT = 5_000_000  # Volumen mínimo en USDT en 24h para operar un par
 
 # ------------------------------------------------------------------------------
 # CALCULADORA DE ENTRADAS (capital / riesgo / leverage) — editable
@@ -72,8 +73,8 @@ TZ_LOCAL = ZoneInfo("America/Bogota")
 INTERVALO_MONITOR_SEG = 20              
 # ==============================================================================
 
-USUARIO_ESPERANDO_DATO = {}  # chat_id -> variable que se está esperando ingresar
-PROTECCIONES_ENVIADAS = set()  # Conjunto local para evitar duplicación continua
+USUARIO_ESPERANDO_DATO = {}  
+PROTECCIONES_ENVIADAS = set()  
 
 
 def _binance_signed_request(method, path, params, api_key, api_secret):
@@ -94,7 +95,7 @@ def _binance_signed_request(method, path, params, api_key, api_secret):
 
 
 # ==============================================================================
-# FILTRO SMA (Mantiene la estructura original del bot intacta)
+# FILTRO SMA ESTRICTO (Lejos de ambas medias y fuera de zona muerta)
 # ==============================================================================
 def validar_filtro_sma(exchange, symbol, es_long, precio_actual):
     if not USAR_FILTRO_SMA:
@@ -111,23 +112,27 @@ def validar_filtro_sma(exchange, symbol, es_long, precio_actual):
         sma_20 = sum(cierres[-SMA_CORTA_PERIODO:]) / SMA_CORTA_PERIODO
         sma_200 = sum(cierres[-SMA_LARGA_PERIODO:]) / SMA_LARGA_PERIODO
         
+        # Validación de zona muerta entre ambas SMAs
         if min(sma_20, sma_200) <= precio_actual <= max(sma_20, sma_200):
-            return False, f"precio en zona muerta (entre SMA20 [{sma_20:.5f}] y SMA200 [{sma_200:.5f}])"
+            return False, f"precio atrapado en zona muerta (entre SMA20 [{sma_20:.5f}] y SMA200 [{sma_200:.5f}])"
         
-        distancia_pct = abs((precio_actual - sma_20) / sma_20) * 100
-        if distancia_pct < DISTANCIA_MIN_PORCENTAJE:
-            return False, f"distancia a SMA20 es {distancia_pct:.2f}% (requerido >= {DISTANCIA_MIN_PORCENTAJE}%)"
+        # Distancia obligatoria y estricta a AMBAS medias móviles
+        dist_sma20 = abs((precio_actual - sma_20) / sma_20) * 100
+        dist_sma200 = abs((precio_actual - sma_200) / sma_200) * 100
+
+        if dist_sma20 < DISTANCIA_MIN_PORCENTAJE or dist_sma200 < DISTANCIA_MIN_PORCENTAJE:
+            return False, f"muy cerca de las SMA (Distancia SMA20: {dist_sma20:.2f}%, SMA200: {dist_sma200:.2f}%, requerido >= {DISTANCIA_MIN_PORCENTAJE}%)"
         
         if es_long:
             if precio_actual < sma_20 and sma_20 < sma_200:
-                return True, f"LONG verificado | Distancia SMA20: {distancia_pct:.2f}%"
+                return True, f"LONG verificado | Distancias OK (SMA20: {dist_sma20:.2f}%)"
             else:
-                return False, f"LONG rechazado: No cumple estructura (Precio < SMA20 < SMA200)"
+                return False, f"LONG rechazado: No cumple estructura bajista de fondo (Precio < SMA20 < SMA200)"
         else:
             if precio_actual > sma_20 and sma_20 > sma_200:
-                return True, f"SHORT verificado | Distancia SMA20: {distancia_pct:.2f}%"
+                return True, f"SHORT verificado | Distancias OK (SMA20: {dist_sma20:.2f}%)"
             else:
-                return False, f"SHORT rechazado: No cumple estructura (Precio > SMA20 > SMA200)"
+                return False, f"SHORT rechazado: No cumple estructura alcista de fondo (Precio > SMA20 > SMA200)"
 
     except Exception as e:
         return False, f"error al calcular SMA ({e})"
@@ -187,7 +192,6 @@ def contar_posiciones_por_lado(exchange):
 
     try:
         ordenes = exchange.fetch_open_orders(params={'subType': 'linear'})
-        
         if not ordenes:
             try:
                 ordenes = exchange.fapiPrivateGetOpenOrders()
@@ -383,7 +387,6 @@ def verificar_proteccion_activa(exchange, symbol, simbolo_binance):
         ordenes_algo = resp_algo.get('data', []) if isinstance(resp_algo, dict) else resp_algo
         
         tiene_algo = len(ordenes_algo) > 0
-
         if tiene_algo:
             PROTECCIONES_ENVIADAS.add(symbol)
             return True
@@ -436,6 +439,7 @@ def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
             'triggerPrice': exchange.price_to_precision(symbol, info['precio_stop']),
             'quantity': info['cantidad_str'],
             'reduceOnly': 'true',
+            'timeInForce': 'GTC',
             'workingType': 'CONTRACT_PRICE',
             'priceProtect': 'true',
         }, BINANCE_API_KEY, BINANCE_API_SECRET)
@@ -496,7 +500,8 @@ AJUSTES_EDITABLES = {
     'MIN_RATIO': (float, 0.5, 100, "Ratio R:R mínimo (2 = 1:2)"),
     'ACTIVACION_TRAILING_R': (float, 1.05, 10, "Activación del trailing en múltiplos de R"),
     'MINUTOS_MAX_ORDEN_PENDIENTE': (float, 0, 1440, "Minutos antes de cancelar una orden límite sin llenar (0 = nunca)"),
-    'DISTANCIA_MIN_PORCENTAJE': (float, 0.1, 20.0, "% Distancia mínima a SMA 20"),
+    'DISTANCIA_MIN_PORCENTAJE': (float, 0.1, 20.0, "% Distancia mínima a las SMA"),
+    'VOLUMEN_MINIMO_24H_USDT': (float, 0, 1_000_000_000, "Volumen mínimo en 24h (USDT)"),
     'USAR_FILTRO_SMA': (bool, None, None, "Activar filtro de tendencia SMA (true/false)"),
     'PAUSA_ENTRE_PARES_SEG': (float, 0, 10, "Pausa entre pares (seg)"),
     'PAUSA_ERROR_RED_SEG': (float, 1, 300, "Pausa tras error de red (seg)"),
@@ -511,6 +516,7 @@ ALIAS_AJUSTES = {
     'apalancamiento': 'LEVERAGE', 'operaciones': 'MAX_OPERACIONES_ABIERTAS',
     'ratio': 'MIN_RATIO', 'trailing': 'ACTIVACION_TRAILING_R',
     'pendiente': 'MINUTOS_MAX_ORDEN_PENDIENTE', 'distancia': 'DISTANCIA_MIN_PORCENTAJE',
+    'volumen': 'VOLUMEN_MINIMO_24H_USDT',
     'sma': 'USAR_FILTRO_SMA', 'ejecutar': 'EJECUTAR_ORDENES_REALES',
 }
 
@@ -631,10 +637,9 @@ def panel_ajustes():
         f"⚠️ Riesgo por Operación: {RIESGO_PCT:g}% (≈ {riesgo_usd:.2f} USDT)\n"
         f"⚙️ Apalancamiento: {LEVERAGE}x\n"
         f"📊 Operaciones Simultáneas Máx: {MAX_OPERACIONES_ABIERTAS}\n"
-        f"⏱️ Cancelar Pendiente en: {tiempo_txt}\n"
-        f"🎯 Ratio Mínimo R:R: 1:{MIN_RATIO:g}\n"
-        f"📈 Filtro SMA (20/200): {'ACTIVADO' if USAR_FILTRO_SMA else 'DESACTIVADO'}\n"
-        f"📐 Distancia Mínima a SMA20: {DISTANCIA_MIN_PORCENTAJE:g}%\n"
+        f"📈 Volumen Mínimo 24h: {VOLUMEN_MINIMO_24H_USDT:,.0f} USDT\n"
+        f"📈 Filtro SMA Estricto: {'ACTIVADO' if USAR_FILTRO_SMA else 'DESACTIVADO'}\n"
+        f"📐 Distancia Mínima a SMA: {DISTANCIA_MIN_PORCENTAJE:g}%\n"
         "───────────────────────────────\n"
         "Toca un botón para cambiar el parámetro e ingresa el nuevo número:"
     )
@@ -642,10 +647,9 @@ def panel_ajustes():
     botones = [
         [{'text': '💰 Cambiar Capital', 'callback_data': 'pedir|CAPITAL_DISPONIBLE'},
          {'text': '⚠️ Cambiar Riesgo %', 'callback_data': 'pedir|RIESGO_PCT'}],
-        [{'text': '⚙️ Cambiar Leverage', 'callback_data': 'pedir|LEVERAGE'},
-         {'text': '📊 Cambiar Cupos Máx', 'callback_data': 'pedir|MAX_OPERACIONES_ABIERTAS'}],
-        [{'text': '📐 Distancia SMA20 %', 'callback_data': 'pedir|DISTANCIA_MIN_PORCENTAJE'},
-         {'text': '📈 Filtro SMA True/False', 'callback_data': 'pedir|USAR_FILTRO_SMA'}],
+        [{'text': '📈 Cambiar Volumen Mín', 'callback_data': 'pedir|VOLUMEN_MINIMO_24H_USDT'},
+         {'text': '📐 Distancia SMA %', 'callback_data': 'pedir|DISTANCIA_MIN_PORCENTAJE'}],
+        [{'text': '📈 Filtro SMA True/False', 'callback_data': 'pedir|USAR_FILTRO_SMA'}],
     ]
     return texto, botones
 
@@ -732,7 +736,8 @@ def _tg_procesar(upd):
             tg_enviar(f"📡 ESTADO DEL BOT\nModo: {modo}\n"
                       f"Capital {CAPITAL_DISPONIBLE:g} USDT | Riesgo {RIESGO_PCT:g}% | Leverage {LEVERAGE}x\n"
                       f"Cupos: {MAX_OPERACIONES_ABIERTAS} operaciones máx | Pendientes: {MINUTOS_MAX_ORDEN_PENDIENTE:g} min\n"
-                      f"Filtro SMA: {'ON' if USAR_FILTRO_SMA else 'OFF'} ({DISTANCIA_MIN_PORCENTAJE:g}% dist min)\n\n"
+                      f"Volumen Mínimo: {VOLUMEN_MINIMO_24H_USDT:,.0f} USDT\n"
+                      f"Filtro SMA Estricto: {'ON' if USAR_FILTRO_SMA else 'OFF'} ({DISTANCIA_MIN_PORCENTAJE:g}% dist min)\n\n"
                       f"{texto_posiciones()}\n\n{texto_pnl()}")
 
 
@@ -1148,13 +1153,14 @@ def escanear_perpetuos_binance():
         threading.Thread(target=hilo_monitor, args=(exchange,), daemon=True).start()
         modo = "TESTNET" if USAR_TESTNET else "BINANCE REAL"
         tg_enviar(f"🚀 Escáner iniciado ({modo})\n"
-                  f"Filtro SMA (20/200): {'ACTIVADO' if USAR_FILTRO_SMA else 'DESACTIVADO'} (distancia >={DISTANCIA_MIN_PORCENTAJE}%)\n"
+                  f"Filtro SMA Estricto: {'ACTIVADO' if USAR_FILTRO_SMA else 'DESACTIVADO'} (distancia >={DISTANCIA_MIN_PORCENTAJE}%)\n"
+                  f"Volumen mínimo 24h: {VOLUMEN_MINIMO_24H_USDT:,.0f} USDT\n"
                   f"Envío de órdenes: {'ACTIVADO' if EJECUTAR_ORDENES_REALES else 'DESACTIVADO (solo simula)'}")
     else:
         print("ℹ️  TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID no configurados en config.py.")
 
     pares = obtener_solo_perpetuos_usdt(exchange)
-    print(f"🚀 Escáner iniciado | {len(pares)} Perpetuos USDT | Detección Adaptativa + Filtro SMA")
+    print(f"🚀 Escáner iniciado | {len(pares)} Perpetuos USDT | Detección Adaptativa + Filtro SMA Estricto + Volumen")
     print(f"ℹ️  {platform.system()} | Python {sys.version.split()[0]} | ccxt {ccxt.__version__} | "
           f"{'TESTNET' if USAR_TESTNET else 'BINANCE REAL'} | órdenes reales: {'SÍ' if EJECUTAR_ORDENES_REALES else 'NO'} | "
           f"cupo máx: {MAX_OPERACIONES_ABIERTAS}")
@@ -1185,6 +1191,15 @@ def escanear_perpetuos_binance():
             for symbol in pares:
                 try:
                     market_info = exchange.market(symbol)
+
+                    # 1. FILTRADO PREVIO POR VOLUMEN 24H (Ahorra tiempo y evita monedas illíquidas)
+                    try:
+                        ticker = exchange.fetch_ticker(symbol)
+                        volumen_24h = ticker.get('quoteVolume', 0) or 0
+                        if volumen_24h < VOLUMEN_MINIMO_24H_USDT:
+                            continue
+                    except Exception:
+                        continue
 
                     order_book = exchange.fetch_order_book(symbol, limit=500)
                     bids = order_book['bids']
@@ -1237,6 +1252,7 @@ def escanear_perpetuos_binance():
                                 
                                 print(f"\n🟢 [{hora_actual}] ¡ALERTA LONG: {symbol}!")
                                 print(f"   ▸ Filtro SMA: {msg_sma}")
+                                print(f"   ▸ Vol 24h: {volumen_24h:,.0f} USDT")
                                 print(f"   ▸ Pasos: Penúltimo ({paso_penultimo}) | Último ({paso_ultimo})")
                                 print(f"   ▸ Entrada (Pico Bid N1): {compra_1} USDT | Vol: {vol_c1:,.0f} {base_currency}")
                                 print(f"   ▸ TP (Pico Ask N1):      {venta_1} USDT (+{round(pct_tp, 2)}%) | Vol: {vol_v1:,.0f} {base_currency}")
@@ -1261,13 +1277,11 @@ def escanear_perpetuos_binance():
                                         'pct_movimiento_sl': pct_sl,
                                         'calc': calc,
                                     })
-                                else:
-                                    print()
 
                                 alerta_encontrada = True
 
                     # ==========================================
-                    # EVALUACIÓN SHORT (Lógica original intacta)
+                    # EVALUACIÓN SHORT
                     # ==========================================
                     if venta_2 and venta_2 > venta_1:
                         distancia_tp_s = venta_1 - compra_1
@@ -1286,6 +1300,7 @@ def escanear_perpetuos_binance():
                                 
                                 print(f"\n🔴 [{hora_actual}] ¡ALERTA SHORT: {symbol}!")
                                 print(f"   ▸ Filtro SMA: {msg_sma}")
+                                print(f"   ▸ Vol 24h: {volumen_24h:,.0f} USDT")
                                 print(f"   ▸ Pasos: Penúltimo ({paso_penultimo}) | Último ({paso_ultimo})")
                                 print(f"   ▸ Entrada (Pico Ask N1): {venta_1} USDT | Vol: {vol_v1:,.0f} {base_currency}")
                                 print(f"   ▸ TP (Pico Bid N1):      {compra_1} USDT (-{round(pct_tp_s, 2)}%) | Vol: {vol_c1:,.0f} {base_currency}")
@@ -1310,8 +1325,6 @@ def escanear_perpetuos_binance():
                                         'pct_movimiento_sl': pct_sl_s,
                                         'calc': calc,
                                     })
-                                else:
-                                    print()
 
                                 alerta_encontrada = True
 
@@ -1322,7 +1335,7 @@ def escanear_perpetuos_binance():
 
             hora_fin = time.strftime('%H:%M:%S')
             if not alerta_encontrada:
-                print(f"⏳ [{hora_fin}] Ciclo finalizado sin señales que superen el criterio 1:{MIN_RATIO} y filtro SMA.")
+                print(f"⏳ [{hora_fin}] Ciclo finalizado sin señales que superen el criterio 1:{MIN_RATIO}, volumen mín y filtro SMA estricto.")
             else:
                 candidatas_ordenadas = ordenar_candidatas_por_score(señales_candidatas)
                 print(f"\n📊 [{hora_fin}] Ciclo finalizado con {len(candidatas_ordenadas)} candidata(s), evaluando por score...")
