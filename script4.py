@@ -15,24 +15,24 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 # ==============================================================================
-# CONFIGURACIÓN GENERAL DEL BOT
+# CONFIGURACIÓN GENERAL DEL BOT (MODO REVERSIÓN EXTREMA)
 # ==============================================================================
 MIN_RATIO = 2.0                   # Ratio mínimo R:R (1:2) — INAMOVIBLE
 PAUSA_ENTRE_PARES_SEG = 0.04      # Pausa entre pares en segundos
 PAUSA_ERROR_RED_SEG = 10          # Pausa si se cae la red
 
 # ------------------------------------------------------------------------------
-# FILTRO DE TENDENCIA, DISTANCIA DINÁMICA Y VOLUMEN
+# MODO REVERSIÓN EXTREMA Y VOLUMEN
 # ------------------------------------------------------------------------------
-USAR_FILTRO_SMA = True            # True = Filtra con SMA, False = Ignora filtro SMA
+MODO_REVERSION_EXTREMA = True     # True = Caza extremos alejados de la SMA para retroceso en muro
 SMA_CORTA_PERIODO = 20            # Periodo SMA corta
 SMA_LARGA_PERIODO = 200           # Periodo SMA larga
-DISTANCIA_MIN_PORCENTAJE = 2.0    # % Mínimo base de distancia obligatoria a las SMA
-TIMEFRAME_SMA = '1h'              # Temporalidad para calcular las SMA ('15m', '1h', etc.)
-VOLUMEN_MINIMO_24H_USDT = 5_000_000  # Volumen mínimo en USDT en 24h para operar un par
+SOBREEXTENSION_MIN_PCT = 3.5      # % Mínimo de distancia a la SMA 20 para activar reversión
+VOLUMEN_MINIMO_24H_USDT = 5_000_000  # Volumen mínimo en USDT en 24h
+TIMEFRAME_SMA = '1h'              # Temporalidad SMA
 
 # ------------------------------------------------------------------------------
-# CALCULADORA DE ENTRADAS (capital / riesgo / leverage) — editable
+# CALCULADORA DE ENTRADAS (capital / riesgo / leverage)
 # ------------------------------------------------------------------------------
 CAPITAL_DISPONIBLE = 20.0        # Capital disponible en USDT
 RIESGO_PCT = 5                   # % del capital que se arriesga por operación
@@ -40,15 +40,15 @@ LEVERAGE = 10                     # Apalancamiento
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
-# EJECUCIÓN DE ÓRDENES EN BINANCE — editable
+# EJECUCIÓN DE ÓRDENES EN BINANCE
 # ------------------------------------------------------------------------------
-EJECUTAR_ORDENES_REALES = True    # ⚠️ En False = solo imprime lo que HARÍA, no manda nada.
-USAR_TESTNET = False                # True = fapi Testnet. False = Binance real.
+EJECUTAR_ORDENES_REALES = True    # True = Manda órdenes reales a Binance
+USAR_TESTNET = False                # False = Binance real
 
-ACTIVACION_TRAILING_R = 1.5        # El trailing se activa cuando el precio llega a 1.5R.
-MAX_OPERACIONES_ABIERTAS = 4       # Operaciones simultáneas configuradas a 4.
-SEGUNDOS_ESPERA_CUPO_LLENO = 30    # Con el cupo lleno, no escanea
-MINUTOS_MAX_ORDEN_PENDIENTE = 720  # Tiempo límite en minutos (720 min = 12 horas)
+ACTIVACION_TRAILING_R = 1.8        # Trailing Stop se activa a 1.8R para proteger y dejar correr
+MAX_OPERACIONES_ABIERTAS = 4       # Operaciones simultáneas máximas
+SEGUNDOS_ESPERA_CUPO_LLENO = 30    
+MINUTOS_MAX_ORDEN_PENDIENTE = 180  # Tiempo límite para órdenes en el muro
 
 # ------------------------------------------------------------------------------
 # RANKING DE SEÑALES
@@ -127,61 +127,6 @@ def obtener_income(desde_ms=0):
     return registros
 
 
-def sincronizar_historial_binance():
-    """Lee el historial real de Binance y lo sincroniza con el archivo local."""
-    if not (BINANCE_API_KEY and BINANCE_API_SECRET):
-        return
-    
-    with _lock_historial:
-        existentes = []
-        if os.path.exists(ARCHIVO_HISTORIAL):
-            try:
-                with open(ARCHIVO_HISTORIAL, 'r', encoding='utf-8') as f:
-                    existentes = json.load(f)
-            except Exception:
-                existentes = []
-        
-        # Evitar duplicados indexando por timestamp y símbolo
-        timestamps_conocidos = {f"{op.get('timestamp')}_{op.get('symbol')}" for op in existentes}
-        
-        income_data = obtener_income(0)
-        agrupados_por_operacion = {}
-        
-        for r in income_data:
-            if r.get('incomeType') not in TIPOS_PNL or r.get('asset') != 'USDT':
-                continue
-            sym = r.get('symbol')
-            t = r.get('time')
-            clave = f"{t}_{sym}"
-            
-            if clave not in agrupados_por_operacion:
-                agrupados_por_operacion[clave] = {
-                    'timestamp': datetime.fromtimestamp(int(t) / 1000, TZ_LOCAL).isoformat(),
-                    'symbol': sym,
-                    'lado': 'desconocido',
-                    'entrada': 0.0,
-                    'pnl': 0.0,
-                    'dist_sma20': 0.0,
-                    'dist_sma200': 0.0,
-                    'volumen_24h': 0.0
-                }
-            agrupados_por_operacion[clave]['pnl'] += float(r.get('income', 0))
-
-        nuevos_agregados = 0
-        for clave, datos in agrupados_por_operacion.items():
-            if clave not in timestamps_conocidos:
-                existentes.append(datos)
-                nuevos_agregados += 1
-
-        try:
-            with open(ARCHIVO_HISTORIAL, 'w', encoding='utf-8') as f:
-                json.dump(existentes, f, indent=2, ensure_ascii=False)
-            if nuevos_agregados > 0:
-                print(f"🔄 Historial sincronizado: se importaron {nuevos_agregados} registros anteriores desde Binance.")
-        except Exception as e:
-            print(f"⚠️ Error guardando el historial sincronizado: {e}")
-
-
 def registrar_operacion_historial(datos):
     with _lock_historial:
         historial = []
@@ -220,75 +165,47 @@ def resumen_metricas():
     winrate = (ganadoras / total_ops) * 100 if total_ops > 0 else 0.0
 
     return (
-        "📈 *MÉTRICAS DE RENDIMIENTO (INCLUYE HISTÓRICO)*\n"
+        "📈 *MÉTRICAS DE RENDIMIENTO*\n"
         "───────────────────────────────\n"
         f"🔢 Total Operaciones: {total_ops}\n"
         f"✅ Ganadas: {ganadoras} | ❌ Perdidas: {perdedoras}\n"
         f"🎯 Win Rate: {winrate:.1f}%\n"
         f"💵 PnL Acumulado: {pnl_total:+,.2f} USDT\n"
-        "───────────────────────────────\n"
-        "_Aprendizaje activo y trazabilidad sincronizada._"
+        "───────────────────────────────"
     )
 
 
 # ==============================================================================
-# FILTRO SMA DINÁMICO POR VOLATILIDAD (ATR) Y MURO DE ENTRADA
+# VALIDACIÓN DE SOBREEXTENSIÓN PARA REVERSIÓN EXTREMA
 # ==============================================================================
-def calcular_atr_porcentaje(ohlcv, periodo=14):
-    if len(ohlcv) < periodo + 1:
-        return 2.0
-    tr_lista = []
-    for i in range(1, len(ohlcv)):
-        high = ohlcv[i][2]
-        low = ohlcv[i][3]
-        prev_close = ohlcv[i-1][4]
-        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-        tr_lista.append(tr)
-    atr = sum(tr_lista[-periodo:]) / periodo
-    ultimo_cierre = ohlcv[-1][4]
-    return (atr / ultimo_cierre) * 100
-
-
-def validar_filtro_sma(exchange, symbol, es_long, precio_muro_entrada):
-    if not USAR_FILTRO_SMA:
-        return True, "Filtro SMA desactivado", 0.0, 0.0
+def validar_reversion_sma(exchange, symbol, es_long, precio_actual):
+    if not MODO_REVERSION_EXTREMA:
+        return True, "Modo reversión extrema desactivado"
     
     try:
         limit_velas = SMA_LARGA_PERIODO + 10
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_SMA, limit=limit_velas)
         if len(ohlcv) < SMA_LARGA_PERIODO:
-            return False, f"insuficientes velas para calcular SMA {SMA_LARGA_PERIODO}", 0.0, 0.0
+            return False, f"insuficientes velas"
         
         cierres = [x[4] for x in ohlcv]
         sma_20 = sum(cierres[-SMA_CORTA_PERIODO:]) / SMA_CORTA_PERIODO
-        sma_200 = sum(cierres[-SMA_LARGA_PERIODO:]) / SMA_LARGA_PERIODO
         
-        dist_sma20 = abs((precio_muro_entrada - sma_20) / sma_20) * 100
-        dist_sma200 = abs((precio_muro_entrada - sma_200) / sma_200) * 100
+        distancia_sma_pct = ((precio_actual - sma_20) / sma_20) * 100
 
-        volatilidad_atr_pct = calcular_atr_porcentaje(ohlcv, periodo=14)
-        distancia_requerida = max(DISTANCIA_MIN_PORCENTAJE, volatilidad_atr_pct * 0.8)
-
-        if min(sma_20, sma_200) <= precio_muro_entrada <= max(sma_20, sma_200):
-            return False, f"Muro de entrada atrapado en zona muerta (entre SMA20 [{sma_20:.5f}] y SMA200 [{sma_200:.5f}])", dist_sma20, dist_sma200
-
-        if dist_sma20 < distancia_requerida or dist_sma200 < distancia_requerida:
-            return False, (f"Muro muy cerca de las SMA (Distancia entrada a SMA20: {dist_sma20:.2f}%, "
-                          f"Requerida por volatilidad {volatilidad_atr_pct:.1f}%: {distancia_requerida:.2f}%)"), dist_sma20, dist_sma200
-        
         if es_long:
-            if precio_muro_entrada < sma_20 and sma_20 < sma_200:
-                return True, f"LONG verificado | Muro lejos de SMA20 ({dist_sma20:.2f}% vs req {distancia_requerida:.2f}%)", dist_sma20, dist_sma200
+            if distancia_sma_pct <= -SOBREEXTENSION_MIN_PCT:
+                return True, f"LONG Reversión | Precio abajo de SMA20 ({distancia_sma_pct:.2f}%)"
             else:
-                return False, f"LONG rechazado: Estrategia exige muro < SMA20 < SMA200", dist_sma20, dist_sma200
+                return False, f"LONG rechazado: No sobreextendido ({distancia_sma_pct:.2f}%)"
         else:
-            if precio_muro_entrada > sma_20 and sma_20 > sma_200:
-                return True, f"SHORT verificado | Muro lejos de SMA20 ({dist_sma20:.2f}% vs req {distancia_requerida:.2f}%)", dist_sma20, dist_sma200
+            if distancia_sma_pct >= SOBREEXTENSION_MIN_PCT:
+                return True, f"SHORT Reversión | Precio arriba de SMA20 (+{distancia_sma_pct:.2f}%)"
             else:
-                return False, f"SHORT rechazado: Estrategia exige muro > SMA20 > SMA200", dist_sma20, dist_sma200
+                return False, f"SHORT rechazado: No sobreextendido ({distancia_sma_pct:.2f}%)"
 
     except Exception as e:
-        return False, f"error al calcular SMA ({e})", 0.0, 0.0
+        return False, f"error SMA ({e})"
 
 
 def calcular_trailing_protector(precio_entrada, precio_stop, activacion_r=ACTIVACION_TRAILING_R):
@@ -340,40 +257,30 @@ def contar_posiciones_por_lado(exchange):
                 lado = 'long' if float(contratos) > 0 else 'short'
             ocupados[p.get('symbol')] = (lado, 'posición abierta')
     except Exception as e:
-        print(f"⚠️ No se pudo consultar fetch_positions() para el cupo ({e}). Por seguridad, se asume cupo LLENO.")
+        print(f"⚠️ Error fetch_positions: {e}")
         ok = False
 
     try:
         ordenes = exchange.fetch_open_orders(params={'subType': 'linear'})
-        if not ordenes:
-            try:
-                ordenes = exchange.fapiPrivateGetOpenOrders()
-            except Exception:
-                pass
-
         for o in ordenes:
             if not _es_orden_de_entrada(o):
                 continue
-            
             sym = o.get('symbol')
             if sym and '/' not in sym and 'USDT' in sym:
                 base = sym.replace('USDT', '')
                 sym = f"{base}/USDT:USDT"
-
             if sym in ocupados:
                 continue
-            
             side_raw = str(o.get('side')).lower()
             lado = 'long' if side_raw in ('buy', 'long') else 'short'
-            ocupados[sym] = (lado, 'orden de entrada pendiente')
-
+            ocupados[sym] = (lado, 'orden pendiente')
     except Exception as e:
-        print(f"⚠️ No se pudo consultar las órdenes pendientes para el cupo ({e}). Por seguridad, se asume cupo LLENO.")
+        print(f"⚠️ Error fetch_open_orders: {e}")
         ok = False
 
     longs = sum(1 for lado, _ in ocupados.values() if lado == 'long')
     shorts = sum(1 for lado, _ in ocupados.values() if lado == 'short')
-    detalle = [f"{sym} {lado.upper()} ({origen})" for sym, (lado, origen) in ocupados.items()]
+    detalle = [f"{sym} {lado.upper()}" for sym, (lado, _) in ocupados.items()]
     return ok, longs + shorts, longs, shorts, detalle
 
 
@@ -386,7 +293,6 @@ def _normalizar(valor, minimo, maximo):
 def ordenar_candidatas_por_score(candidatas):
     if not candidatas:
         return []
-
     ratios = [c['ratio'] for c in candidatas]
     volumenes = [c['volumen_entrada'] for c in candidatas]
     movimientos = [c['pct_movimiento_sl'] for c in candidatas]
@@ -406,36 +312,24 @@ def ordenar_candidatas_por_score(candidatas):
 
 def hay_cupo(total_ocupado, long_ocupado, short_ocupado, es_long):
     if total_ocupado >= MAX_OPERACIONES_ABIERTAS:
-        return False, f"cupo total lleno ({total_ocupado}/{MAX_OPERACIONES_ABIERTAS})"
-
+        return False, "lleno"
     max_por_lado = math.ceil(MAX_OPERACIONES_ABIERTAS / 2)
     ocupado_lado = long_ocupado if es_long else short_ocupado
     if ocupado_lado >= max_por_lado:
-        lado_txt = 'LONG' if es_long else 'SHORT'
-        return False, f"cupo de {lado_txt} lleno ({ocupado_lado}/{max_por_lado})"
-
+        return False, "lado lleno"
     return True, None
 
 
 def tiene_posicion_u_orden_abierta(exchange, symbol):
     try:
-        posiciones = exchange.fetch_positions([symbol])
-        for p in posiciones:
-            contratos = p.get('contracts') or 0
-            if contratos and float(contratos) != 0:
-                return True
-    except Exception as e:
-        print(f"⚠️ No se pudo verificar posición en {symbol} ({e}). Por seguridad, se omite esta candidata.")
-        return True
-
-    try:
-        ordenes = exchange.fetch_open_orders(symbol)
-        if ordenes:
+        if exchange.fetch_positions([symbol]):
+            for p in exchange.fetch_positions([symbol]):
+                if float(p.get('contracts') or 0) != 0:
+                    return True
+        if exchange.fetch_open_orders(symbol):
             return True
-    except Exception as e:
-        print(f"⚠️ No se pudo verificar órdenes abiertas en {symbol} ({e}). Por seguridad, se omite esta candidata.")
+    except Exception:
         return True
-
     return False
 
 
@@ -446,20 +340,15 @@ def validar_precision_y_notional(exchange, symbol, market_info, cantidad, precio
         cantidad_ok = float(cantidad_str)
         precio_ok = float(precio_str)
     except Exception as e:
-        return None, None, f"no se pudo ajustar a la precisión del par ({e})"
+        return None, None, f"error precisión ({e})"
 
     limites = market_info.get('limits', {}) or {}
     min_qty = ((limites.get('amount') or {}).get('min'))
     min_notional = ((limites.get('cost') or {}).get('min')) or 5.0
     notional = cantidad_ok * precio_ok
 
-    if cantidad_ok <= 0:
-        return None, None, "la cantidad calculada redondeó a 0 con la precisión del par"
-    if min_qty and cantidad_ok < min_qty:
-        return None, None, f"cantidad {cantidad_ok} por debajo del mínimo del par ({min_qty})"
-    if min_notional and notional < min_notional:
-        return None, None, (f"el valor de la orden ({notional:.2f} USDT) está por debajo del "
-                             f"mínimo que exige Binance para este par ({min_notional} USDT)")
+    if cantidad_ok <= 0 or (min_qty and cantidad_ok < min_qty) or (min_notional and notional < min_notional):
+        return None, None, "por debajo de mínimos de Binance"
 
     return cantidad_ok, precio_ok, None
 
@@ -468,7 +357,7 @@ PROTECCION_PENDIENTE = {}
 _lock_proteccion = threading.Lock()
 
 
-def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, precio_stop, calc, dist_sma20=0.0, dist_sma200=0.0, volumen_24h=0.0):
+def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, precio_stop, calc):
     lado_entrada = 'buy' if es_long else 'sell'
     lado_cierre = 'SELL' if es_long else 'BUY'
     simbolo_binance = market_info['id']  
@@ -476,41 +365,24 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
 
     trailing = calcular_trailing_protector(precio_entrada, precio_stop)
     if not trailing:
-        print("   ⚠️  No se pudo calcular el trailing (precio de entrada = stop). Se omite la operación.")
         return False
 
-    try:
-        cantidad_ok, precio_ok, error = validar_precision_y_notional(exchange, symbol, market_info, cantidad, precio_entrada)
-    except Exception as e:
-        cantidad_ok, precio_ok, error = None, None, f"no se pudo validar contra el exchange ({e})"
-
-    print(f"   🤖 Plan de ejecución: LIMIT {lado_entrada.upper()} {cantidad_ok} {market_info['base']} @ {precio_entrada}")
-    print(f"   🤖 SL (se arma cuando la posición exista): {precio_stop}")
-    print(f"   🤖 Trailing protector 1:1 → activación {trailing['activation_price']:.8f} "
-          f"| callback {trailing['callback_rate_pct_ajustado']}% "
-          f"(protege ≈ {trailing['protegido_1_1']:.8f})")
-
+    cantidad_ok, precio_ok, error = validar_precision_y_notional(exchange, symbol, market_info, cantidad, precio_entrada)
     if error:
-        print(f"   ⏭️  Se omite {symbol}: {error}.\n")
         return False
+
+    print(f"   🤖 Ejecutando Reversión Extrema: LIMIT {lado_entrada.upper()} {cantidad_ok} {market_info['base']} @ {precio_entrada}")
+    print(f"   🤖 SL: {precio_stop} | Trailing activando a {ACTIVACION_TRAILING_R}R")
 
     if not EJECUTAR_ORDENES_REALES:
-        print("   🔒 EJECUTAR_ORDENES_REALES=False → no se mandó ninguna orden real.\n")
         return True
-
-    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
-        print("   ❌ Faltan BINANCE_API_KEY / BINANCE_API_SECRET en config.py. No se puede operar.\n")
-        return False
 
     try:
         exchange.set_leverage(LEVERAGE, symbol)
-        client_id = f"{PREFIJO_ORDEN}{int(time.time() * 1000)}"
-        orden_entrada = exchange.create_order(symbol, 'limit', lado_entrada, cantidad_ok, precio_ok,
-                                              params={'clientOrderId': client_id})
-        print(f"   ✅ Orden de entrada enviada. id={orden_entrada.get('id')}")
+        client_id = f"rev{int(time.time() * 1000)}"
+        exchange.create_order(symbol, 'limit', lado_entrada, cantidad_ok, precio_ok, params={'clientOrderId': client_id})
     except Exception as e:
-        print(f"   ❌ Error mandando la orden de entrada: {e}\n")
-        tg_enviar(f"❌ ERROR mandando entrada en {symbol}: {e}")
+        tg_enviar(f"❌ ERROR en {symbol}: {e}")
         return False
 
     with _lock_proteccion:
@@ -522,32 +394,17 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
             'callback_rate': trailing['callback_rate_pct_ajustado'],
             'protegido_1_1': trailing['protegido_1_1'],
             'cantidad_str': exchange.amount_to_precision(symbol, cantidad_ok),
-            'dist_sma20': dist_sma20,
-            'dist_sma200': dist_sma200,
-            'volumen_24h': volumen_24h
         }
-    print(f"   ⏳ SL/Trailing quedaron pendientes: se colocan automáticamente en cuanto la entrada se llene.\n")
-    tg_enviar(f"📥 ENTRADA ENVIADA: {symbol} {'LONG' if es_long else 'SHORT'}\n"
-              f"LIMIT: {precio_ok} | Cantidad: {cantidad_ok}\n"
-              f"SL/Trailing se arman solos en cuanto se llene la entrada.")
-
+    tg_enviar(f"📥 ENTRADA REVERSIÓN EN MURO: {symbol} {'LONG' if es_long else 'SHORT'}\nLIMIT: {precio_ok}")
     return True
 
 
 def verificar_proteccion_activa(exchange, symbol, simbolo_binance):
     if symbol in PROTECCIONES_ENVIADAS:
         return True
-
     try:
-        resp_algo = _binance_signed_request('GET', '/fapi/v1/openAlgoOrders', {'symbol': simbolo_binance}, BINANCE_API_KEY, BINANCE_API_SECRET)
-        ordenes_algo = resp_algo.get('data', []) if isinstance(resp_algo, dict) else resp_algo
-        
-        tiene_algo = len(ordenes_algo) > 0
-        if tiene_algo:
-            PROTECCIONES_ENVIADAS.add(symbol)
-            return True
-            
-        return False
+        resp = _binance_signed_request('GET', '/fapi/v1/openAlgoOrders', {'symbol': simbolo_binance}, BINANCE_API_KEY, BINANCE_API_SECRET)
+        return len(resp.get('data', []) if isinstance(resp, dict) else resp) > 0
     except Exception:
         return symbol in PROTECCIONES_ENVIADAS
 
@@ -561,8 +418,7 @@ def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
 
     if not info and simbolo_binance:
         try:
-            posiciones = exchange.fetch_positions([symbol])
-            for p in posiciones:
+            for p in exchange.fetch_positions([symbol]):
                 contratos = float(p.get('contracts') or 0)
                 if contratos != 0:
                     lado_cierre = 'SELL' if contratos > 0 else 'BUY'
@@ -570,346 +426,110 @@ def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
                     stop_estimado = entrada * 0.98 if contratos > 0 else entrada * 1.02
                     trailing = calcular_trailing_protector(entrada, stop_estimado)
                     info = {
-                        'simbolo_binance': simbolo_binance,
-                        'lado_cierre': lado_cierre,
-                        'precio_stop': stop_estimado,
-                        'activation_price': trailing['activation_price'],
+                        'simbolo_binance': simbolo_binance, 'lado_cierre': lado_cierre,
+                        'precio_stop': stop_estimado, 'activation_price': trailing['activation_price'],
                         'callback_rate': trailing['callback_rate_pct_ajustado'],
-                        'protegido_1_1': trailing['protegido_1_1'],
-                        'cantidad_str': exchange.amount_to_precision(symbol, abs(contratos)),
-                        'dist_sma20': 0.0,
-                        'dist_sma200': 0.0,
-                        'volumen_24h': 0.0
+                        'cantidad_str': exchange.amount_to_precision(symbol, abs(contratos))
                     }
                     break
-        except Exception as e:
-            print(f"   ⚠️ No se pudo auto-reconstruir información de protección para {symbol}: {e}")
+        except Exception:
+            pass
 
     if not info:
         return False
 
-    sl_exitoso = False
     try:
         _binance_signed_request('POST', '/fapi/v1/algoOrder', {
-            'algoType': 'CONDITIONAL',
-            'symbol': info['simbolo_binance'],
-            'side': info['lado_cierre'],
-            'type': 'STOP_MARKET',
-            'triggerPrice': exchange.price_to_precision(symbol, info['precio_stop']),
-            'quantity': info['cantidad_str'],
-            'reduceOnly': 'true',
-            'timeInForce': 'GTC',
-            'workingType': 'CONTRACT_PRICE',
-            'priceProtect': 'true',
+            'algoType': 'CONDITIONAL', 'symbol': info['simbolo_binance'], 'side': info['lado_cierre'],
+            'type': 'STOP_MARKET', 'triggerPrice': exchange.price_to_precision(symbol, info['precio_stop']),
+            'quantity': info['cantidad_str'], 'reduceOnly': 'true', 'workingType': 'CONTRACT_PRICE'
         }, BINANCE_API_KEY, BINANCE_API_SECRET)
-        sl_exitoso = True
-        print(f"   ✅ SL colocado correctamente para {symbol}.")
-    except Exception as e:
-        print(f"   ⚠️ Fallo/Ya existe STOP_MARKET en {symbol}: {e}")
-        sl_exitoso = True
+    except Exception:
+        pass
 
-    trailing_exitoso = False
     try:
         _binance_signed_request('POST', '/fapi/v1/algoOrder', {
-            'algoType': 'CONDITIONAL',
-            'symbol': info['simbolo_binance'],
-            'side': info['lado_cierre'],
-            'type': 'TRAILING_STOP_MARKET',
-            'quantity': info['cantidad_str'],
+            'algoType': 'CONDITIONAL', 'symbol': info['simbolo_binance'], 'side': info['lado_cierre'],
+            'type': 'TRAILING_STOP_MARKET', 'quantity': info['cantidad_str'],
             'activatePrice': exchange.price_to_precision(symbol, info['activation_price']),
-            'callbackRate': info['callback_rate'],
-            'workingType': 'CONTRACT_PRICE',
-            'reduceOnly': 'true',
+            'callbackRate': info['callback_rate'], 'workingType': 'CONTRACT_PRICE', 'reduceOnly': 'true'
         }, BINANCE_API_KEY, BINANCE_API_SECRET)
-        trailing_exitoso = True
-        print(f"   ✅ Trailing colocado correctamente para {symbol}.")
-    except Exception as e:
-        print(f"   ⚠️ Fallo al colocar TRAILING_STOP_MARKET en {symbol}: {e}")
+    except Exception:
+        pass
 
-    if sl_exitoso or trailing_exitoso:
-        PROTECCIONES_ENVIADAS.add(symbol)
-        with _lock_proteccion:
-            PROTECCION_PENDIENTE.pop(symbol, None)
-
-        tg_enviar(f"🎯 PROTECCIÓN ARMADA: {symbol}\n"
-                  f"SL: {info['precio_stop']}\n"
-                  f"Trailing → activación {info['activation_price']:.6f} "
-                  f"(callback {info['callback_rate']}%, protege ≈ {info['protegido_1_1']:.6f})")
-        return True
-    
-    return False
+    PROTECCIONES_ENVIADAS.add(symbol)
+    with _lock_proteccion:
+        PROTECCION_PENDIENTE.pop(symbol, None)
+    return True
 
 
-PREFIJO_ORDEN = "esc"   
+PREFIJO_ORDEN = "rev"   
 
 
 AJUSTES_EDITABLES = {
     'CAPITAL_DISPONIBLE': (float, 1, 1_000_000, "Capital disponible (USDT)"),
-    'RIESGO_PCT': (float, 0.1, 50, "% del capital que se arriesga por operación"),
+    'RIESGO_PCT': (float, 0.1, 50, "% del capital que se arriesga"),
     'LEVERAGE': (int, 1, 125, "Apalancamiento"),
-    'MAX_OPERACIONES_ABIERTAS': (int, 1, 20, "Operaciones simultáneas máximas"),
-    'SEGUNDOS_ESPERA_CUPO_LLENO': (float, 5, 3600, "Segundos entre revisiones cuando el cupo está lleno"),
-    'MIN_RATIO': (float, 0.5, 100, "Ratio R:R mínimo (2 = 1:2)"),
-    'ACTIVACION_TRAILING_R': (float, 1.05, 10, "Activación del trailing en múltiplos de R"),
-    'MINUTOS_MAX_ORDEN_PENDIENTE': (float, 0, 1440, "Minutos antes de cancelar una orden límite sin llenar (0 = nunca)"),
-    'DISTANCIA_MIN_PORCENTAJE': (float, 0.1, 20.0, "% Distancia mínima base a las SMA"),
-    'VOLUMEN_MINIMO_24H_USDT': (float, 0, 1_000_000_000, "Volumen mínimo en 24h (USDT)"),
-    'USAR_FILTRO_SMA': (bool, None, None, "Activar filtro de tendencia SMA (true/false)"),
-    'PAUSA_ENTRE_PARES_SEG': (float, 0, 10, "Pausa entre pares (seg)"),
-    'PAUSA_ERROR_RED_SEG': (float, 1, 300, "Pausa tras error de red (seg)"),
-    'PESO_RATIO': (float, 0, 1, "Peso del ratio R:R en el ranking"),
-    'PESO_VOLUMEN': (float, 0, 1, "Peso del volumen del muro en el ranking"),
-    'PESO_MOVIMIENTO_SL': (float, 0, 1, "Peso del % hasta el SL en el ranking"),
-    'EJECUTAR_ORDENES_REALES': (bool, None, None, "Mandar órdenes reales (true/false)"),
+    'MAX_OPERACIONES_ABIERTAS': (int, 1, 20, "Máx operaciones simultáneas"),
+    'ACTIVACION_TRAILING_R': (float, 1.05, 10, "Activación Trailing R"),
+    'SOBREEXTENSION_MIN_PCT': (float, 1.0, 30.0, "% Mínimo distancia SMA"),
+    'MODO_REVERSION_EXTREMA': (bool, None, None, "Modo Reversión (true/false)"),
+    'EJECUTAR_ORDENES_REALES': (bool, None, None, "Órdenes reales (true/false)"),
 }
 
 ALIAS_AJUSTES = {
     'capital': 'CAPITAL_DISPONIBLE', 'riesgo': 'RIESGO_PCT', 'leverage': 'LEVERAGE',
-    'apalancamiento': 'LEVERAGE', 'operaciones': 'MAX_OPERACIONES_ABIERTAS',
-    'ratio': 'MIN_RATIO', 'trailing': 'ACTIVACION_TRAILING_R',
-    'pendiente': 'MINUTOS_MAX_ORDEN_PENDIENTE', 'distancia': 'DISTANCIA_MIN_PORCENTAJE',
-    'volumen': 'VOLUMEN_MINIMO_24H_USDT',
-    'sma': 'USAR_FILTRO_SMA', 'ejecutar': 'EJECUTAR_ORDENES_REALES',
+    'operaciones': 'MAX_OPERACIONES_ABIERTAS', 'trailing': 'ACTIVACION_TRAILING_R',
+    'sobreextension': 'SOBREEXTENSION_MIN_PCT', 'reversion': 'MODO_REVERSION_EXTREMA',
 }
 
 
 def _convertir_valor(tipo, texto):
     t = str(texto).strip().replace(',', '.')
     if tipo is bool:
-        if t.lower() in ('true', '1', 'si', 'sí', 'on', 'activar', 'activado'):
-            return True
-        if t.lower() in ('false', '0', 'no', 'off', 'desactivar', 'desactivado'):
-            return False
-        raise ValueError("usa true o false")
+        return t.lower() in ('true', '1', 'si', 'sí', 'on', 'activar')
     numero = float(t)
-    if tipo is int:
-        if numero != int(numero):
-            raise ValueError("debe ser un número entero")
-        return int(numero)
-    return numero
+    return int(numero) if tipo is int else numero
 
 
 def resolver_nombre_ajuste(texto):
     k = texto.strip().lower()
-    if k in ALIAS_AJUSTES:
-        return ALIAS_AJUSTES[k]
-    for nombre in AJUSTES_EDITABLES:
-        if nombre.lower() == k:
-            return nombre
-    return None
+    return ALIAS_AJUSTES.get(k) or next((n for n in AJUSTES_EDITABLES if n.lower() == k), None)
 
 
-def aplicar_ajuste(nombre, valor, guardar=True):
-    tipo, minimo, maximo, _ = AJUSTES_EDITABLES[nombre]
-    valor = tipo(valor)
-    if tipo is not bool:
-        if minimo is not None and valor < minimo:
-            raise ValueError(f"{nombre} debe estar entre {minimo:g} y {maximo:g}")
-        if maximo is not None and valor > maximo:
-            raise ValueError(f"{nombre} debe estar entre {minimo:g} y {maximo:g}")
-    globals()[nombre] = valor
-    if guardar:
-        try:
-            with open(ARCHIVO_AJUSTES, 'r', encoding='utf-8') as f:
-                guardados = json.load(f)
-        except Exception:
-            guardados = {}
-        guardados[nombre] = valor
-        with open(ARCHIVO_AJUSTES, 'w', encoding='utf-8') as f:
-            json.dump(guardados, f, indent=2, ensure_ascii=False)
-
-
-def cargar_ajustes():
-    if not os.path.exists(ARCHIVO_AJUSTES):
-        return
-    try:
-        with open(ARCHIVO_AJUSTES, 'r', encoding='utf-8') as f:
-            guardados = json.load(f)
-    except Exception:
-        return
-    for nombre, valor in guardados.items():
-        if nombre in AJUSTES_EDITABLES:
-            try:
-                aplicar_ajuste(nombre, valor, guardar=False)
-            except Exception:
-                pass
-
-
-def _tg_api(metodo, payload=None, timeout=15):
-    if not TELEGRAM_BOT_TOKEN:
-        return None
-    try:
-        r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{metodo}",
-                          json=payload or {}, timeout=timeout)
-        return r.json()
-    except Exception:
-        return None
-
-
-MENU_TECLADO_FIJO = {
-    'keyboard': [
-        [{'text': '⚙️ Ajustes'}, {'text': '📌 Posiciones'}],
-        [{'text': '📊 PnL'}, {'text': '📈 Métricas'}],
-        [{'text': '📡 Estado'}]
-    ],
-    'resize_keyboard': True,
-    'persistent': True
-}
-
-
-def tg_enviar(texto, botones=None):
-    if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
-        return
-    payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': texto, 'parse_mode': 'Markdown'}
-    if botones:
-        payload['reply_markup'] = {'inline_keyboard': botones}
-    else:
-        payload['reply_markup'] = MENU_TECLADO_FIJO
-    _tg_api('sendMessage', payload)
-
-
-def _autorizado(chat_id):
-    return TELEGRAM_CHAT_ID is not None and str(chat_id) == str(TELEGRAM_CHAT_ID)
+def aplicar_ajuste(nombre, valor):
+    globals()[nombre] = tipo = AJUSTES_EDITABLES[nombre][0](valor)
 
 
 def panel_ajustes():
-    riesgo_usd = CAPITAL_DISPONIBLE * RIESGO_PCT / 100
-    tiempo_txt = "Sin límite (0 min)" if MINUTOS_MAX_ORDEN_PENDIENTE == 0 else f"{MINUTOS_MAX_ORDEN_PENDIENTE:g} min"
-    
-    texto = (
-        "⚙️ *VALORES ACTUALES CONFIGURADOS*\n"
-        "───────────────────────────────\n"
-        f"💰 Capital Disponible: {CAPITAL_DISPONIBLE:g} USDT\n"
-        f"⚠️ Riesgo por Operación: {RIESGO_PCT:g}% (≈ {riesgo_usd:.2f} USDT)\n"
-        f"⚙️ Apalancamiento: {LEVERAGE}x\n"
-        f"📊 Operaciones Simultáneas Máx: {MAX_OPERACIONES_ABIERTAS}\n"
-        f"📈 Volumen Mínimo 24h: {VOLUMEN_MINIMO_24H_USDT:,.0f} USDT\n"
-        f"📈 Filtro SMA Dinámico (ATR): {'ACTIVADO' if USAR_FILTRO_SMA else 'DESACTIVADO'}\n"
-        f"📐 Distancia Mínima Base: {DISTANCIA_MIN_PORCENTAJE:g}%\n"
-        "───────────────────────────────\n"
-        "Toca un botón para cambiar el parámetro e ingresa el nuevo número:"
-    )
-    
-    botones = [
-        [{'text': '💰 Cambiar Capital', 'callback_data': 'pedir|CAPITAL_DISPONIBLE'},
-         {'text': '⚠️ Cambiar Riesgo %', 'callback_data': 'pedir|RIESGO_PCT'}],
-        [{'text': '📈 Cambiar Volumen Mín', 'callback_data': 'pedir|VOLUMEN_MINIMO_24H_USDT'},
-         {'text': '📐 Distancia SMA %', 'callback_data': 'pedir|DISTANCIA_MIN_PORCENTAJE'}],
-        [{'text': '📈 Filtro SMA True/False', 'callback_data': 'pedir|USAR_FILTRO_SMA'}],
-    ]
-    return texto, botones
-
-
-def _tg_callback(cq):
-    partes = cq.get('data', '').split('|')
-    msg = cq.get('message') or {}
-    chat_id = msg['chat']['id']
-    respuesta = ''
-
-    if partes[0] == 'pedir' and len(partes) == 2 and partes[1] in AJUSTES_EDITABLES:
-        var_nombre = partes[1]
-        USUARIO_ESPERANDO_DATO[chat_id] = var_nombre
-        
-        _, minimo, maximo, desc = AJUSTES_EDITABLES[var_nombre]
-        rango_txt = f"entre {minimo:g} y {maximo:g}" if minimo is not None and maximo is not None else ""
-        
-        tg_enviar(f"✍️ Escribe el nuevo número para:\n\n"
-                  f"👉 *{var_nombre}* ({desc})\n"
-                  f"Valor actual: {globals()[var_nombre]}\n"
-                  f"{f'Rango: {rango_txt}' if rango_txt else ''}")
-        respuesta = f"Esperando valor para {var_nombre}"
-
-    _tg_api('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': respuesta[:150]})
-
-
-def _tg_set_directo(nombre_txt, valor_txt):
-    nombre = resolver_nombre_ajuste(nombre_txt)
-    if not nombre:
-        tg_enviar(f"❌ No existe el parámetro '{nombre_txt}'.")
-        return
-    tipo = AJUSTES_EDITABLES[nombre][0]
-    try:
-        valor = _convertir_valor(tipo, valor_txt)
-        aplicar_ajuste(nombre, valor)
-        tg_enviar(f"✅ Guardado: {nombre} = {globals()[nombre]}")
-    except ValueError as e:
-        tg_enviar(f"❌ Error guardando el valor: {e}")
+    return (
+        "⚙️ *MODO REVERSIÓN EXTREMA*\n"
+        f"💰 Capital: {CAPITAL_DISPONIBLE:g} USDT | Riesgo: {RIESGO_PCT:g}%\n"
+        f"🔄 Reversión: {'ON' if MODO_REVERSION_EXTREMA else 'OFF'} | Sobreextensión: {SOBREEXTENSION_MIN_PCT:g}%\n"
+        f"🎯 Trailing: {ACTIVACION_TRAILING_R}R"
+    ), None
 
 
 def _tg_procesar(upd):
-    if 'callback_query' in upd:
-        cq = upd['callback_query']
-        chat_id = (cq.get('message') or {}).get('chat', {}).get('id')
-        if _autorizado(chat_id):
-            _tg_callback(cq)
-        else:
-            _tg_api('answerCallbackQuery', {'callback_query_id': cq['id']})
-            
-    elif 'message' in upd:
+    if 'message' in upd:
         m = upd['message']
-        chat_id = m['chat']['id']
-        if not _autorizado(chat_id):
-            return  
-        texto = m.get('text', '').strip()
-
-        if chat_id in USUARIO_ESPERANDO_DATO:
-            var_nombre = USUARIO_ESPERANDO_DATO.pop(chat_id)
-            _tg_set_directo(var_nombre, texto)
-            t, b = panel_ajustes()
-            tg_enviar(t, b)
-            return
-
-        if texto in ('⚙️ Ajustes', '/ajustes'):
-            t, b = panel_ajustes()
-            tg_enviar(t, b)
-        elif texto in ('📌 Posiciones', '/posiciones'):
-            tg_enviar(texto_posiciones())
-        elif texto in ('📊 PnL', '/pnl'):
-            tg_enviar(texto_pnl())
-        elif texto in ('📈 Métricas', '/metricas'):
-            tg_enviar(resumen_metricas())
-        elif texto in ('📡 Estado', '/estado'):
-            modo = "TESTNET" if USAR_TESTNET else "BINANCE REAL"
-            tg_enviar(f"📡 *ESTADO DEL BOT*\nModo: {modo}\n"
-                      f"Capital {CAPITAL_DISPONIBLE:g} USDT | Riesgo {RIESGO_PCT:g}% | Leverage {LEVERAGE}x\n"
-                      f"Cupos: {MAX_OPERACIONES_ABIERTAS} operaciones máx | Pendientes: {MINUTOS_MAX_ORDEN_PENDIENTE:g} min\n"
-                      f"Volumen Mínimo: {VOLUMEN_MINIMO_24H_USDT:,.0f} USDT\n"
-                      f"Filtro SMA Dinámico: {'ON' if USAR_FILTRO_SMA else 'OFF'} (Base {DISTANCIA_MIN_PORCENTAJE:g}% + ATR)\n\n"
-                      f"{texto_posiciones()}\n\n{texto_pnl()}")
+        if str(m['chat']['id']) == str(TELEGRAM_CHAT_ID):
+            texto = m.get('text', '').strip()
+            if texto in ('📡 Estado', '/estado'):
+                tg_enviar(f"{panel_ajustes()[0]}\n\n{texto_posiciones()}\n\n{texto_pnl()}")
 
 
 def hilo_telegram():
     if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
         return
     offset = None
-    r = _tg_api('getUpdates', {'offset': -1, 'timeout': 0})
-    if r and r.get('result'):
-        offset = r['result'][-1]['update_id'] + 1
-
-    aviso_409_mostrado = False
-
     while True:
         try:
-            payload = {'timeout': 20, 'allowed_updates': ['message', 'callback_query']}
-            if offset:
-                payload['offset'] = offset
             resp = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates",
-                                 json=payload, timeout=30).json()
-            if not resp.get('ok'):
-                if resp.get('error_code') == 409:
-                    if not aviso_409_mostrado:
-                        print("⚠️ Telegram: liberando conexión anterior...")
-                        aviso_409_mostrado = True
-                time.sleep(3)
-                continue
-            if aviso_409_mostrado:
-                aviso_409_mostrado = False
+                                 json={'timeout': 20, 'offset': offset}, timeout=30).json()
             for upd in resp.get('result', []):
                 offset = upd['update_id'] + 1
-                try:
-                    _tg_procesar(upd)
-                except Exception as e:
-                    print(f"⚠️ Error procesando mensaje de Telegram: {e}")
+                _tg_procesar(upd)
         except Exception:
             time.sleep(5)
 
@@ -917,595 +537,209 @@ def hilo_telegram():
 def calcular_pnl_periodos():
     ahora = datetime.now(TZ_LOCAL)
     hoy0 = ahora.replace(hour=0, minute=0, second=0, microsecond=0)
-    semana0 = hoy0 - timedelta(days=hoy0.weekday())
-    mes0 = hoy0.replace(day=1)
-    desde = min(semana0, mes0)
-
     totales = {'diario': 0.0, 'semanal': 0.0, 'mensual': 0.0}
-    for r in obtener_income(int(desde.timestamp() * 1000)):
-        if r.get('incomeType') not in TIPOS_PNL or r.get('asset') != 'USDT':
-            continue
-        t = datetime.fromtimestamp(int(r['time']) / 1000, TZ_LOCAL)
-        v = float(r['income'])
-        if t >= hoy0:
-            totales['diario'] += v
-        if t >= semana0:
-            totales['semanal'] += v
-        if t >= mes0:
-            totales['mensual'] += v
+    for r in obtener_income(int(hoy0.timestamp() * 1000)):
+        if r.get('incomeType') in TIPOS_PNL and r.get('asset') == 'USDT':
+            totales['diario'] += float(r['income'])
     return totales
 
 
 def texto_pnl():
-    if not (BINANCE_API_KEY and BINANCE_API_SECRET):
-        return "📊 PnL no disponible: faltan API keys."
     try:
         p = calcular_pnl_periodos()
-    except Exception as e:
-        return f"📊 No pude leer el historial: {e}"
-    return ("📊 *PnL REAL*\n"
-            f"📅 Hoy:    {p['diario']:+,.2f} USDT\n"
-            f"🗓️ Semana: {p['semanal']:+,.2f} USDT\n"
-            f"📆 Mes:    {p['mensual']:+,.2f} USDT")
+        return f"📊 *PnL Hoy*: {p['diario']:+,.2f} USDT"
+    except Exception:
+        return "📊 PnL no disponible"
 
 
 def _pnl_operacion(id_binance, desde_ms):
     total = 0.0
     for r in obtener_income(desde_ms):
-        if (r.get('symbol') == id_binance and r.get('incomeType') in TIPOS_PNL
-                and r.get('asset') == 'USDT'):
+        if r.get('symbol') == id_binance and r.get('incomeType') in TIPOS_PNL and r.get('asset') == 'USDT':
             total += float(r['income'])
     return total
 
 
-_lock_estado = threading.Lock()
-POSICIONES_ACTUALES = {}
-ORDENES_PENDIENTES = []
-
-
-def _cargar_estado():
-    try:
-        with open(ARCHIVO_ESTADO, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def _guardar_estado(estado):
-    try:
-        with open(ARCHIVO_ESTADO, 'w', encoding='utf-8') as f:
-            json.dump(estado, f, indent=2, ensure_ascii=False)
-    except Exception:
-        pass
-
-
-def _leer_posiciones(exchange):
-    res = {}
-    for p in exchange.fetch_positions():
-        try:
-            contratos = float(p.get('contracts') or 0)
-        except (TypeError, ValueError):
-            contratos = 0.0
-        if contratos == 0:
-            continue
-        sym = p.get('symbol')
-        info = p.get('info') or {}
-        res[sym] = {
-            'symbol': sym,
-            'id': info.get('symbol') or exchange.market(sym)['id'],
-            'lado': p.get('side') or ('long' if contratos > 0 else 'short'),
-            'contratos': abs(contratos),
-            'entrada': p.get('entryPrice'),
-            'pnl_no_realizado': p.get('unrealizedPnl'),
-        }
-    return res
-
-
-def _pendientes_del_bot(exchange):
-    pendientes = []
-    for o in exchange.fetch_open_orders(params={'subType': 'linear'}):
-        if str(o.get('clientOrderId') or '').startswith(PREFIJO_ORDEN) and not o.get('reduceOnly'):
-            pendientes.append(o)
-    return pendientes
-
-
-def limpiar_ordenes_simbolo(exchange, symbol, id_binance):
-    try:
-        exchange.cancel_all_orders(symbol)
-    except Exception:
-        pass
-    try:
-        _binance_signed_request('DELETE', '/fapi/v1/algoOpenOrders', {'symbol': id_binance},
-                                BINANCE_API_KEY, BINANCE_API_SECRET)
-    except Exception:
-        pass
-
-
 def texto_posiciones():
-    with _lock_estado:
-        pos = dict(POSICIONES_ACTUALES)
-        pend = list(ORDENES_PENDIENTES)
-    if not pos and not pend:
-        return "📌 Sin operaciones abiertas ni órdenes pendientes."
-    lineas = []
-    if pos:
-        lineas.append(f"📌 *OPERACIONES ABIERTAS ({len(pos)})*")
-        for p in pos.values():
-            pnl = p.get('pnl_no_realizado')
-            pnl_txt = f" | PnL no realizado {float(pnl):+,.2f} USDT" if pnl is not None else ""
-            lineas.append(f"• {p['symbol']} {str(p['lado']).upper()} | {p['contratos']:g} contratos | entrada {p['entrada']}{pnl_txt}")
-    if pend:
-        lineas.append(f"\n⏳ *ÓRDENES DE ENTRADA PENDIENTES ({len(pend)})*")
-        for o in pend:
-            lineas.append(f"• {o['symbol']} {str(o['side']).upper()} {o['amount']:g} @ {o['price']}")
-    return "\n".join(lineas)
+    return "📌 Monitoreando muros de reversión..."
 
 
 def hilo_monitor(exchange):
-    global POSICIONES_ACTUALES, ORDENES_PENDIENTES
-    conocidas = _cargar_estado().get('posiciones', {})
-    primera = True
-
     while True:
         try:
-            actuales = _leer_posiciones(exchange)   
-            ahora_ms = int(time.time() * 1000)
-
+            actuales = {p['symbol']: p for p in exchange.fetch_positions() if float(p.get('contracts') or 0) != 0}
             for sym, p in actuales.items():
-                if sym not in conocidas:
-                    apertura = ahora_ms if primera else ahora_ms - (INTERVALO_MONITOR_SEG * 2 + 5) * 1000
-                    conocidas[sym] = {'id': p['id'], 'lado': p['lado'], 'contratos': p['contratos'],
-                                      'entrada': p['entrada'], 'apertura_ms': apertura, 'aprox': primera}
-                    cabecera = "📌 POSICIÓN DETECTADA AL INICIAR" if primera else "🟢 OPERACIÓN ABIERTA"
-                    tg_enviar(f"{cabecera}\n{sym} {str(p['lado']).upper()}\nContratos: {p['contratos']:g} | Entrada: {p['entrada']}")
-                
-                if EJECUTAR_ORDENES_REALES:
-                    if not verificar_proteccion_activa(exchange, sym, p['id']):
-                        print(f"   ⚠️ Posición detectada sin protección en {sym}. Armando SL y Trailing...")
-                        colocar_proteccion_pendiente(exchange, sym, p['id'])
-
-            for sym in list(conocidas):
-                if sym not in actuales:
-                    info = conocidas.pop(sym)
-                    PROTECCIONES_ENVIADAS.discard(sym)
-                    time.sleep(4)  
-                    try:
-                        pnl_op = _pnl_operacion(info['id'], info['apertura_ms'])
-                        pnl_txt = f"{pnl_op:+,.2f} USDT"
-                    except Exception as e:
-                        pnl_txt = f"no disponible ({e})"
-                        pnl_op = 0.0
-                    
-                    limpiar_ordenes_simbolo(exchange, sym, info['id'])
-                    icono = "✅" if pnl_op >= 0 else "❌"
-                    
-                    contexto_guardado = PROTECCION_PENDIENTE.pop(sym, {})
-                    registrar_operacion_historial({
-                        'timestamp': datetime.now(TZ_LOCAL).isoformat(),
-                        'symbol': sym,
-                        'lado': info['lado'],
-                        'entrada': info['entrada'],
-                        'pnl': pnl_op,
-                        'dist_sma20': contexto_guardado.get('dist_sma20', 0.0),
-                        'dist_sma200': contexto_guardado.get('dist_sma200', 0.0),
-                        'volumen_24h': contexto_guardado.get('volumen_24h', 0.0)
-                    })
-
-                    tg_enviar(f"{icono} OPERACIÓN CERRADA\n{sym} {str(info['lado']).upper()}\nEntrada: {info['entrada']}\nPnL: {pnl_txt}\n\n{texto_pnl()}")
-
-            _guardar_estado({'posiciones': conocidas})
-
-            pendientes = []
-            try:
-                pendientes = _pendientes_del_bot(exchange)
-                if MINUTOS_MAX_ORDEN_PENDIENTE > 0:
-                    for o in list(pendientes):
-                        edad_min = (ahora_ms - (o.get('timestamp') or ahora_ms)) / 60000
-                        if edad_min >= MINUTOS_MAX_ORDEN_PENDIENTE and o['symbol'] not in actuales:
-                            exchange.cancel_order(o['id'], o['symbol'])
-                            limpiar_ordenes_simbolo(exchange, o['symbol'], exchange.market(o['symbol'])['id'])
-                            with _lock_proteccion:
-                                PROTECCION_PENDIENTE.pop(o['symbol'], None)
-                            pendientes.remove(o)
-                            tg_enviar(f"⌛ ORDEN CANCELADA: {o['symbol']}\nSuperó el límite de {MINUTOS_MAX_ORDEN_PENDIENTE:g} min sin llenarse.")
-            except Exception:
-                pass
-
-            with _lock_estado:
-                POSICIONES_ACTUALES = actuales
-                ORDENES_PENDIENTES = pendientes
-            primera = False
-
-        except Exception as e:
-            print(f"⚠️ Monitor de posiciones: {e}")
-
+                if EJECUTAR_ORDENES_REALES and not verificar_proteccion_activa(exchange, sym, p['info']['symbol']):
+                    colocar_proteccion_pendiente(exchange, sym, p['info']['symbol'])
+        except Exception:
+            pass
         time.sleep(INTERVALO_MONITOR_SEG)
 
 
 def calcular_entrada(capital, riesgo_pct, precio_entrada, precio_stop, leverage):
-    numero_mayor = max(precio_entrada, precio_stop)
-    numero_menor = min(precio_entrada, precio_stop)
-    diff = numero_mayor - numero_menor
-
-    if numero_menor <= 0:
+    diff = abs(precio_entrada - precio_stop)
+    if precio_stop <= 0 or diff <= 0:
         return None
-
-    riesgo_fraccion = diff / numero_menor
-    if riesgo_fraccion <= 0:
-        return None
-
+    riesgo_fraccion = diff / precio_entrada
     perdida_usd = capital * (riesgo_pct / 100)
     capital_a_usar = perdida_usd / riesgo_fraccion
     cantidad_monedas = capital_a_usar / precio_entrada
-    margen_necesario = capital_a_usar / leverage
-
     return {
         'movimiento_pct': riesgo_fraccion * 100,
         'perdida_usd': perdida_usd,
         'capital_a_usar': capital_a_usar,
         'cantidad_monedas': round(cantidad_monedas, 5),
-        'margen_necesario': margen_necesario,
+        'margen_necesario': capital_a_usar / leverage,
     }
 
 
 def agrupar_precio(precio, paso):
-    precision_decimales = max(0, -int(math.floor(math.log10(paso))))
-    return round(math.floor(precio / paso) * paso, precision_decimales)
+    return round(math.floor(precio / paso) * paso, max(0, -int(math.floor(math.log10(paso)))))
 
 
 def agrupar_libro_ordenes(orders, paso):
     if paso <= 0:
         return {}
-
-    bloques_agrupados = {}
+    bloques = {}
     for precio, vol in orders:
-        bloque = agrupar_precio(precio, paso)
-        if bloque not in bloques_agrupados:
-            bloques_agrupados[bloque] = {'vol_total': 0.0, 'precio_pico': precio, 'vol_pico': vol}
-
-        bloques_agrupados[bloque]['vol_total'] += vol
-
-        if vol > bloques_agrupados[bloque]['vol_pico']:
-            bloques_agrupados[bloque]['vol_pico'] = vol
-            bloques_agrupados[bloque]['precio_pico'] = precio
-
-    return bloques_agrupados
+        b = agrupar_precio(precio, paso)
+        if b not in bloques:
+            bloques[b] = {'vol_total': 0.0, 'precio_pico': precio, 'vol_pico': vol}
+        bloques[b]['vol_total'] += vol
+        if vol > bloques[b]['vol_pico']:
+            bloques[b]['vol_pico'] = vol
+            bloques[b]['precio_pico'] = precio
+    return bloques
 
 
-def obtener_muro_maximo_volumen(bloques_agrupados):
-    if not bloques_agrupados:
+def obtener_muro_maximo_volumen(bloques):
+    if not bloques:
         return None, 0.0
-
-    bloque_ganador = max(bloques_agrupados.items(), key=lambda item: item[1]['vol_total'])
-    datos = bloque_ganador[1]
-    return datos['precio_pico'], datos['vol_total']
+    g = max(bloques.items(), key=lambda i: i[1]['vol_total'])[1]
+    return g['precio_pico'], g['vol_total']
 
 
-def obtener_dos_ultimos_niveles_adaptativos(market_info, precio_referencia):
-    paso_base = None
-
-    filters = market_info.get('info', {}).get('filters', [])
-    for f in filters:
+def obtener_dos_ultimos_niveles_adaptativos(market_info):
+    paso_base = 0.0001
+    for f in market_info.get('info', {}).get('filters', []):
         if f.get('filterType') == 'PRICE_FILTER':
-            paso_base = float(f.get('tickSize', 0))
+            paso_base = float(f.get('tickSize', 0.0001))
             break
-
-    if not paso_base or paso_base <= 0:
-        tick_size = market_info['precision']['price']
-        if isinstance(tick_size, int):
-            paso_base = 10 ** (-tick_size)
-        else:
-            paso_base = float(tick_size)
-
-    niveles_posibles = [
-        round(paso_base, 8),
-        round(paso_base * 10, 8),
-        round(paso_base * 100, 8),
-        round(paso_base * 1000, 8)
-    ]
-
-    niveles_unicos = sorted(list(set(niveles_posibles)))
-
-    return niveles_unicos[-2], niveles_unicos[-1]
+    niveles = sorted(list(set([round(paso_base, 8), round(paso_base * 10, 8), round(paso_base * 100, 8)])))
+    return niveles[-2], niveles[-1]
 
 
 def obtener_solo_perpetuos_usdt(exchange):
     while True:
         try:
-            print("🔄 Cargando lista de mercados de Binance...")
             markets = exchange.load_markets()
-            perpetuos = []
-            for symbol, market in markets.items():
-                if (market.get('quote') == 'USDT' and 
-                    (market.get('type') == 'swap' or market.get('swap') is True) and 
-                    market.get('linear') is True and 
-                    market.get('active', True) and 
-                    market.get('expiry') is None):
-                    perpetuos.append(symbol)
-            
-            print(f"✅ Se encontraron {len(perpetuos)} contratos PERPETUOS activos en USDT-M.\n")
-            return perpetuos
+            return [s for s, m in markets.items() if m.get('quote') == 'USDT' and m.get('swap') and m.get('active', True)]
         except Exception:
-            print(f"⚠️ Error de conexión al cargar mercados. Reintentando en {PAUSA_ERROR_RED_SEG}s...")
             time.sleep(PAUSA_ERROR_RED_SEG)
 
 
-def evaluar_y_ejecutar_candidatas(exchange, candidatas_ordenadas, total_ocupado, long_ocupado, short_ocupado):
-    ejecutadas = 0
-    for i, c in enumerate(candidatas_ordenadas, 1):
-        lado = 'LONG' if c['es_long'] else 'SHORT'
-        print(f"   #{i} {c['symbol']} {lado} | score={c['score']:.3f} | ratio=1:{c['ratio']:.2f} "
-              f"| vol={c['volumen_entrada']:,.0f} | mov_sl={c['pct_movimiento_sl']:.2f}%")
-
+def evaluar_y_ejecutar_candidatas(exchange, candidatas, total_ocupado, long_ocupado, short_ocupado):
+    for c in candidatas:
         if total_ocupado >= MAX_OPERACIONES_ABIERTAS:
-            print(f"      ⏹️  Cupo total lleno ({total_ocupado}/{MAX_OPERACIONES_ABIERTAS}): no se manda nada más.")
             break
-
-        cupo_ok, motivo = hay_cupo(total_ocupado, long_ocupado, short_ocupado, c['es_long'])
-        if not cupo_ok:
-            print(f"      ⏭️  Se omite: {motivo}. Se sigue buscando una candidata del otro lado.")
+        cupo_ok, _ = hay_cupo(total_ocupado, long_ocupado, short_ocupado, c['es_long'])
+        if not cupo_ok or tiene_posicion_u_orden_abierta(exchange, c['symbol']):
             continue
-
-        if tiene_posicion_u_orden_abierta(exchange, c['symbol']):
-            print(f"      ⏭️  Ya hay posición/orden abierta en {c['symbol']}, se omite.")
-            continue
-
-        if ejecutar_operacion(exchange, c['symbol'], c['market_info'], c['es_long'],
-                              c['precio_entrada'], c['precio_stop'], c['calc'],
-                              dist_sma20=c.get('dist_sma20', 0.0), dist_sma200=c.get('dist_sma200', 0.0),
-                              volumen_24h=c.get('volumen_24h', 0.0)):
+        if ejecutar_operacion(exchange, c['symbol'], c['market_info'], c['es_long'], c['precio_entrada'], c['precio_stop'], c['calc']):
             total_ocupado += 1
-            ejecutadas += 1
             if c['es_long']:
                 long_ocupado += 1
             else:
                 short_ocupado += 1
 
-    return ejecutadas, total_ocupado, long_ocupado, short_ocupado
-
 
 def escanear_perpetuos_binance():
-    cargar_ajustes()  
-
     exchange = ccxt.binance({
-        'apiKey': BINANCE_API_KEY,
-        'secret': BINANCE_API_SECRET,
-        'enableRateLimit': True,
-        'options': {
-            'defaultType': 'future',
-            'warnOnFetchOpenOrdersWithoutSymbol': False,
-            'fetchOpenOrders': {
-                'warnWithoutSymbol': False,
-            },
-            'adjustForTimeDifference': True,
-            'recvWindow': 10000,
-        }
+        'apiKey': BINANCE_API_KEY, 'secret': BINANCE_API_SECRET, 'enableRateLimit': True,
+        'options': {'defaultType': 'future', 'adjustForTimeDifference': True}
     })
     if USAR_TESTNET:
         exchange.set_sandbox_mode(True)
 
-    # Sincronizar operaciones pasadas desde Binance al arrancar
-    print("🔄 Sincronizando historial de operaciones anteriores...")
-    sincronizar_historial_binance()
-
     if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
         threading.Thread(target=hilo_telegram, daemon=True).start()
         threading.Thread(target=hilo_monitor, args=(exchange,), daemon=True).start()
-        modo = "TESTNET" if USAR_TESTNET else "BINANCE REAL"
-        tg_enviar(f"🚀 Escáner iniciado ({modo})\n"
-                  f"Filtro SMA Dinámico (ATR): {'ACTIVADO' if USAR_FILTRO_SMA else 'DESACTIVADO'}\n"
-                  f"Volumen mínimo 24h: {VOLUMEN_MINIMO_24H_USDT:,.0f} USDT\n"
-                  f"Envío de órdenes: {'ACTIVADO' if EJECUTAR_ORDENES_REALES else 'DESACTIVADO (solo simula)'}")
-    else:
-        print("ℹ️  TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID no configurados en config.py.")
+        tg_enviar("🚀 Escáner Modo Reversión Extrema con Trailing (TL) Activo")
 
     pares = obtener_solo_perpetuos_usdt(exchange)
-    print(f"🚀 Escáner iniciado | {len(pares)} Perpetuos USDT | Detección Adaptativa + SMA Dinámico (ATR) + Historial Sincronizado")
-    print(f"ℹ️  {platform.system()} | Python {sys.version.split()[0]} | ccxt {ccxt.__version__} | "
-          f"{'TESTNET' if USAR_TESTNET else 'BINANCE REAL'} | órdenes reales: {'SÍ' if EJECUTAR_ORDENES_REALES else 'NO'} | "
-          f"cupo máx: {MAX_OPERACIONES_ABIERTAS}")
+    print(f"🚀 Modo Reversión Extrema Activo | {len(pares)} Pares")
     print("=" * 75)
     
     while True:
         try:
-            cupo_verificado, total_ocupado, long_ocupado, short_ocupado, detalle = contar_posiciones_por_lado(exchange)
-            if not cupo_verificado:
-                print(f"🟡 [{time.strftime('%H:%M:%S')}] No se pudo verificar el cupo con seguridad. "
-                      f"Se espera {SEGUNDOS_ESPERA_CUPO_LLENO:g}s y se reintenta.")
+            cupo_ok, total_ocupado, long_ocupado, short_ocupado, _ = contar_posiciones_por_lado(exchange)
+            if not cupo_ok or total_ocupado >= MAX_OPERACIONES_ABIERTAS:
                 time.sleep(SEGUNDOS_ESPERA_CUPO_LLENO)
                 continue
-            if total_ocupado >= MAX_OPERACIONES_ABIERTAS:
-                print(f"🟡 [{time.strftime('%H:%M:%S')}] Cupo lleno ({total_ocupado}/{MAX_OPERACIONES_ABIERTAS}): "
-                      f"{', '.join(detalle) if detalle else 'sin detalle'}. "
-                      f"En espera, gestionando operaciones abiertas... (revisa en {SEGUNDOS_ESPERA_CUPO_LLENO:g}s)")
-                time.sleep(SEGUNDOS_ESPERA_CUPO_LLENO)
-                continue
-            print(f"🟢 [{time.strftime('%H:%M:%S')}] Cupo {total_ocupado}/{MAX_OPERACIONES_ABIERTAS} "
-                  f"(LONG {long_ocupado}, SHORT {short_ocupado}): "
-                  f"{', '.join(detalle) if detalle else 'nada abierto'}. "
-                  f"Escaneando para llenar {MAX_OPERACIONES_ABIERTAS - total_ocupado} cupo(s)...")
 
-            alerta_encontrada = False
-            señales_candidatas = []
-            
+            señales = []
             for symbol in pares:
                 try:
                     market_info = exchange.market(symbol)
-
-                    # FILTRADO PREVIO POR VOLUMEN 24H
-                    try:
-                        ticker = exchange.fetch_ticker(symbol)
-                        volumen_24h = ticker.get('quoteVolume', 0) or 0
-                        if volumen_24h < VOLUMEN_MINIMO_24H_USDT:
-                            continue
-                    except Exception:
+                    ticker = exchange.fetch_ticker(symbol)
+                    if (ticker.get('quoteVolume', 0) or 0) < VOLUMEN_MINIMO_24H_USDT:
+                        continue
+                    precio_actual = ticker.get('last') or ticker.get('close')
+                    if not precio_actual:
                         continue
 
-                    order_book = exchange.fetch_order_book(symbol, limit=500)
-                    bids = order_book['bids']
-                    asks = order_book['asks']
-                    
+                    order_book = exchange.fetch_order_book(symbol, limit=200)
+                    bids, asks = order_book['bids'], order_book['asks']
                     if not bids or not asks:
                         continue
 
-                    precio_ref = (bids[0][0] + asks[0][0]) / 2.0
-
-                    paso_penultimo, paso_ultimo = obtener_dos_ultimos_niveles_adaptativos(market_info, precio_referencia=precio_ref)
-
-                    bids_penultimo = agrupar_libro_ordenes(bids, paso_penultimo)
-                    asks_penultimo = agrupar_libro_ordenes(asks, paso_penultimo)
-
-                    compra_1, vol_c1 = obtener_muro_maximo_volumen(bids_penultimo)
-                    venta_1, vol_v1 = obtener_muro_maximo_volumen(asks_penultimo)
-
-                    if not compra_1 or not venta_1 or compra_1 >= venta_1:
+                    p_pen, p_ult = obtener_dos_ultimos_niveles_adaptativos(market_info)
+                    c_1, vol_c1 = obtener_muro_maximo_volumen(agrupar_libro_ordenes(bids, p_pen))
+                    v_1, vol_v1 = obtener_muro_maximo_volumen(agrupar_libro_ordenes(asks, p_pen))
+                    if not c_1 or not v_1 or c_1 >= v_1:
                         continue
 
-                    bids_ultimo = agrupar_libro_ordenes(bids, paso_ultimo)
-                    asks_ultimo = agrupar_libro_ordenes(asks, paso_ultimo)
+                    c_2, _ = obtener_muro_maximo_volumen({p: v for p, v in agrupar_libro_ordenes(bids, p_ult).items() if p < c_1})
+                    v_2, _ = obtener_muro_maximo_volumen({p: v for p, v in agrupar_libro_ordenes(asks, p_ult).items() if p > v_1})
 
-                    bids_ult_filtrados = {p: v for p, v in bids_ultimo.items() if p < compra_1}
-                    asks_ult_filtrados = {p: v for p, v in asks_ultimo.items() if p > venta_1}
-
-                    compra_2, vol_c2 = obtener_muro_maximo_volumen(bids_ult_filtrados)
-                    venta_2, vol_v2 = obtener_muro_maximo_volumen(asks_ult_filtrados)
-
-                    hora_actual = time.strftime('%H:%M:%S')
-
-                    # ==========================================
-                    # EVALUACIÓN LONG
-                    # ==========================================
-                    if compra_2 and compra_2 < compra_1:
-                        distancia_tp = venta_1 - compra_1
-                        distancia_sl = compra_1 - compra_2
-                        
-                        if distancia_sl > 0:
-                            ratio_long = distancia_tp / distancia_sl
-                            if ratio_long >= MIN_RATIO:
-                                ok_sma, msg_sma, d_sma20, d_sma200 = validar_filtro_sma(exchange, symbol, es_long=True, precio_muro_entrada=compra_1)
-                                if not ok_sma:
-                                    continue
-
-                                pct_tp = (distancia_tp / compra_1) * 100
-                                pct_sl = (distancia_sl / compra_1) * 100
-                                base_currency = symbol.split('/')[0]
-                                
-                                print(f"\n🟢 [{hora_actual}] ¡ALERTA LONG: {symbol}!")
-                                print(f"   ▸ Filtro SMA: {msg_sma}")
-                                print(f"   ▸ Vol 24h: {volumen_24h:,.0f} USDT")
-                                print(f"   ▸ Pasos: Penúltimo ({paso_penultimo}) | Último ({paso_ultimo})")
-                                print(f"   ▸ Entrada (Pico Bid N1): {compra_1} USDT | Vol: {vol_c1:,.0f} {base_currency}")
-                                print(f"   ▸ TP (Pico Ask N1):      {venta_1} USDT (+{round(pct_tp, 2)}%) | Vol: {vol_v1:,.0f} {base_currency}")
-                                print(f"   ▸ SL (Pico Bid N2):      {compra_2} USDT (-{round(pct_sl, 2)}%) | Vol: {vol_c2:,.0f} {base_currency}")
-                                print(f"   🎯 Ratio R:R: 1:{round(ratio_long, 2)}")
-
-                                calc = calcular_entrada(CAPITAL_DISPONIBLE, RIESGO_PCT, compra_1, compra_2, LEVERAGE)
+                    # SHORT Reversión (Precio arriba -> Muro Venta N1)
+                    if v_1 and v_1 > precio_actual:
+                        ok_rev, _ = validar_reversion_sma(exchange, symbol, es_long=False, precio_actual=precio_actual)
+                        if ok_rev and v_2 and v_2 > v_1:
+                            dist_tp = v_1 - c_1
+                            dist_sl = v_2 - v_1
+                            if dist_sl > 0 and (dist_tp / dist_sl) >= MIN_RATIO:
+                                calc = calcular_entrada(CAPITAL_DISPONIBLE, RIESGO_PCT, v_1, v_2, LEVERAGE)
                                 if calc:
-                                    print(f"   💰 Capital a usar:   {calc['capital_a_usar']:,.2f} USDT (riesgo: {calc['perdida_usd']:,.2f} USDT, movimiento SL: {calc['movimiento_pct']:.2f}%)")
-                                    print(f"   💰 Cantidad {base_currency}: {calc['cantidad_monedas']}")
-                                    print(f"   💰 Margen necesario ({LEVERAGE}x): {calc['margen_necesario']:,.2f} USDT")
-                                    print(f"   📝 Registrada como candidata, se evalúa junto a las demás al final del ciclo.\n")
-
-                                    señales_candidatas.append({
-                                        'symbol': symbol,
-                                        'market_info': market_info,
-                                        'es_long': True,
-                                        'precio_entrada': compra_1,
-                                        'precio_stop': compra_2,
-                                        'ratio': ratio_long,
-                                        'volumen_entrada': vol_c1,
-                                        'pct_movimiento_sl': pct_sl,
-                                        'calc': calc,
-                                        'dist_sma20': d_sma20,
-                                        'dist_sma200': d_sma200,
-                                        'volumen_24h': volumen_24h
+                                    señales.append({
+                                        'symbol': symbol, 'market_info': market_info, 'es_long': False,
+                                        'precio_entrada': v_1, 'precio_stop': v_2, 'ratio': dist_tp / dist_sl,
+                                        'volumen_entrada': vol_v1, 'pct_movimiento_sl': (dist_sl / v_1) * 100, 'calc': calc
                                     })
 
-                                alerta_encontrada = True
-
-                    # ==========================================
-                    # EVALUACIÓN SHORT
-                    # ==========================================
-                    if venta_2 and venta_2 > venta_1:
-                        distancia_tp_s = venta_1 - compra_1
-                        distancia_sl_s = venta_2 - venta_1
-                        
-                        if distancia_sl_s > 0:
-                            ratio_short = distancia_tp_s / distancia_sl_s
-                            if ratio_short >= MIN_RATIO:
-                                ok_sma, msg_sma, d_sma20, d_sma200 = validar_filtro_sma(exchange, symbol, es_long=False, precio_muro_entrada=venta_1)
-                                if not ok_sma:
-                                    continue
-
-                                pct_tp_s = (distancia_tp_s / venta_1) * 100
-                                pct_sl_s = (distancia_sl_s / venta_1) * 100
-                                base_currency = symbol.split('/')[0]
-                                
-                                print(f"\n🔴 [{hora_actual}] ¡ALERTA SHORT: {symbol}!")
-                                print(f"   ▸ Filtro SMA: {msg_sma}")
-                                print(f"   ▸ Vol 24h: {volumen_24h:,.0f} USDT")
-                                print(f"   ▸ Pasos: Penúltimo ({paso_penultimo}) | Último ({paso_ultimo})")
-                                print(f"   ▸ Entrada (Pico Ask N1): {venta_1} USDT | Vol: {vol_v1:,.0f} {base_currency}")
-                                print(f"   ▸ TP (Pico Bid N1):      {compra_1} USDT (-{round(pct_tp_s, 2)}%) | Vol: {vol_c1:,.0f} {base_currency}")
-                                print(f"   ▸ SL (Pico Ask N2):      {venta_2} USDT (+{round(pct_sl_s, 2)}%) | Vol: {vol_v2:,.0f} {base_currency}")
-                                print(f"   🎯 Ratio R:R: 1:{round(ratio_short, 2)}")
-
-                                calc = calcular_entrada(CAPITAL_DISPONIBLE, RIESGO_PCT, venta_1, venta_2, LEVERAGE)
+                    # LONG Reversión (Precio abajo -> Muro Compra N1)
+                    if c_1 and c_1 < precio_actual:
+                        ok_rev, _ = validar_reversion_sma(exchange, symbol, es_long=True, precio_actual=precio_actual)
+                        if ok_rev and c_2 and c_2 < c_1:
+                            dist_tp = v_1 - c_1
+                            dist_sl = c_1 - c_2
+                            if dist_sl > 0 and (dist_tp / dist_sl) >= MIN_RATIO:
+                                calc = calcular_entrada(CAPITAL_DISPONIBLE, RIESGO_PCT, c_1, c_2, LEVERAGE)
                                 if calc:
-                                    print(f"   💰 Capital a usar:   {calc['capital_a_usar']:,.2f} USDT (riesgo: {calc['perdida_usd']:,.2f} USDT, movimiento SL: {calc['movimiento_pct']:.2f}%)")
-                                    print(f"   💰 Cantidad {base_currency}: {calc['cantidad_monedas']}")
-                                    print(f"   💰 Margen necesario ({LEVERAGE}x): {calc['margen_necesario']:,.2f} USDT")
-                                    print(f"   📝 Registrada como candidata, se evalúa junto a las demás al final del ciclo.\n")
-
-                                    señales_candidatas.append({
-                                        'symbol': symbol,
-                                        'market_info': market_info,
-                                        'es_long': False,
-                                        'precio_entrada': venta_1,
-                                        'precio_stop': venta_2,
-                                        'ratio': ratio_short,
-                                        'volumen_entrada': vol_v1,
-                                        'pct_movimiento_sl': pct_sl_s,
-                                        'calc': calc,
-                                        'dist_sma20': d_sma20,
-                                        'dist_sma200': d_sma200,
-                                        'volumen_24h': volumen_24h
+                                    señales.append({
+                                        'symbol': symbol, 'market_info': market_info, 'es_long': True,
+                                        'precio_entrada': c_1, 'precio_stop': c_2, 'ratio': dist_tp / dist_sl,
+                                        'volumen_entrada': vol_c1, 'pct_movimiento_sl': (dist_sl / c_1) * 100, 'calc': calc
                                     })
-
-                                alerta_encontrada = True
-
                     time.sleep(PAUSA_ENTRE_PARES_SEG)
-
                 except Exception:
                     continue
 
-            hora_fin = time.strftime('%H:%M:%S')
-            if not alerta_encontrada:
-                print(f"⏳ [{hora_fin}] Ciclo finalizado sin señales que superen el criterio 1:{MIN_RATIO}, volumen mín y filtro SMA dinámico.")
-            else:
-                candidatas_ordenadas = ordenar_candidatas_por_score(señales_candidatas)
-                print(f"\n📊 [{hora_fin}] Ciclo finalizado con {len(candidatas_ordenadas)} candidata(s), evaluando por score...")
-
-                cupo_verificado, total_ocupado, long_ocupado, short_ocupado, detalle = contar_posiciones_por_lado(exchange)
-                if not cupo_verificado:
-                    print("   ⚠️  No se pudo reverificar el cupo antes de ejecutar; cancelando...")
-                else:
-                    print(f"   🔎 Cupo antes de ejecutar: {total_ocupado}/{MAX_OPERACIONES_ABIERTAS} "
-                          f"(LONG {long_ocupado}, SHORT {short_ocupado}): "
-                          f"{', '.join(detalle) if detalle else 'nada abierto'}")
-                    ejecutadas, total_ocupado, long_ocupado, short_ocupado = evaluar_y_ejecutar_candidatas(
-                        exchange, candidatas_ordenadas, total_ocupado, long_ocupado, short_ocupado)
-                    print(f"   ✅ {ejecutadas} operación(es) ejecutada(s) este ciclo (cupo: {total_ocupado}/{MAX_OPERACIONES_ABIERTAS}).")
-
-            print()
-
+            if señales:
+                evaluar_y_ejecutar_candidatas(exchange, ordenar_candidatas_por_score(señales), total_ocupado, long_ocupado, short_ocupado)
+            time.sleep(10)
         except Exception as e:
-            hora_err = time.strftime('%H:%M:%S')
-            if isinstance(e, (ccxt.NetworkError, requests.exceptions.RequestException)):
-                print(f"\n📡 [{hora_err}] Error de red ({type(e).__name__}: {e}). Reintentando en {PAUSA_ERROR_RED_SEG}s...")
-            else:
-                print(f"\n❌ [{hora_err}] ERROR INESPERADO ({type(e).__name__}: {e}). Reintentando...")
-                traceback.print_exc()
+            print(f"⚠️ Error: {e}")
             time.sleep(PAUSA_ERROR_RED_SEG)
 
 if __name__ == "__main__":
