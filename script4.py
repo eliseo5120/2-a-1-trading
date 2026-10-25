@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 # ==============================================================================
 # CONFIGURACIÓN GENERAL DEL BOT
 # ==============================================================================
-MIN_RATIO = 2.0                   # Ratio mínimo R:R (1:2) — INAMOVIBLE
+MIN_RATIO = 2.0                   # Ratio mínimo R:R (1:2)
 PAUSA_ENTRE_PARES_SEG = 0.04      # Pausa entre pares en segundos
 PAUSA_ERROR_RED_SEG = 10          # Pausa si se cae la red
 
@@ -32,7 +32,7 @@ TIMEFRAME_SMA = '1h'              # Temporalidad para calcular las SMA ('15m', '
 VOLUMEN_MINIMO_24H_USDT = 5_000_000  # Volumen mínimo en USDT en 24h para operar un par
 
 # ------------------------------------------------------------------------------
-# CALCULADORA DE ENTRADAS (capital / riesgo / leverage)
+# CALCULADORA DE ENTRADAS (capital / riesgo / leverage) — editable
 # ------------------------------------------------------------------------------
 CAPITAL_DISPONIBLE = 20.0        # Capital disponible en USDT
 RIESGO_PCT = 5                   # % del capital que se arriesga por operación
@@ -40,15 +40,15 @@ LEVERAGE = 10                     # Apalancamiento
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
-# EJECUCIÓN DE ÓRDENES EN BINANCE
+# EJECUCIÓN DE ÓRDENES EN BINANCE — editable
 # ------------------------------------------------------------------------------
-EJECUTAR_ORDENES_REALES = True    # True = Manda órdenes a Binance
-USAR_TESTNET = False                # False = Binance real
+EJECUTAR_ORDENES_REALES = True    # ⚠️ En False = solo imprime lo que HARÍA, no manda nada.
+USAR_TESTNET = False                # True = fapi Testnet. False = Binance real.
 
-ACTIVACION_TRAILING_R = 1.8        # Trailing se activa a 1.8R para dejar correr el TP
-MAX_OPERACIONES_ABIERTAS = 4       # Operaciones simultáneas configuradas a 4
-SEGUNDOS_ESPERA_CUPO_LLENO = 30    
-MINUTOS_MAX_ORDEN_PENDIENTE = 720  
+ACTIVACION_TRAILING_R = 1.5        # El trailing se activa cuando el precio llega a 1.5R.
+MAX_OPERACIONES_ABIERTAS = 4       # Operaciones simultáneas configuradas a 4.
+SEGUNDOS_ESPERA_CUPO_LLENO = 30    # Con el cupo lleno, no escanea
+MINUTOS_MAX_ORDEN_PENDIENTE = 720  # Tiempo límite en minutos (720 min = 12 horas)
 
 # ------------------------------------------------------------------------------
 # RANKING DE SEÑALES
@@ -77,17 +77,6 @@ USUARIO_ESPERANDO_DATO = {}
 PROTECCIONES_ENVIADAS = set()  
 
 
-def _ruta(nombre):
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), nombre)
-
-
-ARCHIVO_AJUSTES = _ruta("ajustes_bot.json")   
-ARCHIVO_ESTADO = _ruta("estado_bot.json")     
-ARCHIVO_HISTORIAL = _ruta("historial_rendimiento.json")
-
-_lock_historial = threading.Lock()
-
-
 def _binance_signed_request(method, path, params, api_key, api_secret):
     params = dict(params)
     params['timestamp'] = int(time.time() * 1000)
@@ -105,76 +94,6 @@ def _binance_signed_request(method, path, params, api_key, api_secret):
     return data
 
 
-TIPOS_PNL = ('REALIZED_PNL', 'COMMISSION', 'FUNDING_FEE')
-
-
-def obtener_income(desde_ms=0):
-    registros = []
-    inicio = desde_ms
-    try:
-        while True:
-            lote = _binance_signed_request('GET', '/fapi/v1/income',
-                                           {'startTime': inicio, 'limit': 1000},
-                                           BINANCE_API_KEY, BINANCE_API_SECRET)
-            if not lote:
-                break
-            registros.extend(lote)
-            if len(lote) < 1000:
-                break
-            inicio = int(lote[-1]['time']) + 1
-    except Exception:
-        pass
-    return registros
-
-
-def registrar_operacion_historial(datos):
-    with _lock_historial:
-        historial = []
-        if os.path.exists(ARCHIVO_HISTORIAL):
-            try:
-                with open(ARCHIVO_HISTORIAL, 'r', encoding='utf-8') as f:
-                    historial = json.load(f)
-            except Exception:
-                historial = []
-        
-        historial.append(datos)
-        try:
-            with open(ARCHIVO_HISTORIAL, 'w', encoding='utf-8') as f:
-                json.dump(historial, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            print(f"⚠️ No se pudo guardar en el historial: {e}")
-
-
-def resumen_metricas():
-    with _lock_historial:
-        if not os.path.exists(ARCHIVO_HISTORIAL):
-            return "📊 Sin operaciones registradas en el historial aún."
-        try:
-            with open(ARCHIVO_HISTORIAL, 'r', encoding='utf-8') as f:
-                historial = json.load(f)
-        except Exception as e:
-            return f"⚠️ Error leyendo historial: {e}"
-
-    if not historial:
-        return "📊 Sin operaciones registradas en el historial aún."
-
-    total_ops = len(historial)
-    ganadoras = sum(1 for op in historial if op.get('pnl', 0) > 0)
-    perdedoras = sum(1 for op in historial if op.get('pnl', 0) <= 0)
-    pnl_total = sum(op.get('pnl', 0) for op in historial)
-    winrate = (ganadoras / total_ops) * 100 if total_ops > 0 else 0.0
-
-    return (
-        "📈 *MÉTRICAS DE RENDIMIENTO*\n"
-        "───────────────────────────────\n"
-        f"🔢 Total Operaciones: {total_ops}\n"
-        f"✅ Ganadas: {ganadoras} | ❌ Perdidas: {perdedoras}\n"
-        f"🎯 Win Rate: {winrate:.1f}%\n"
-        f"💵 PnL Acumulado: {pnl_total:+,.2f} USDT\n"
-        "───────────────────────────────"
-    )
-
-
 # ==============================================================================
 # FILTRO DE REVERSIÓN EXTREMA Y SOBREEXTENSIÓN A LA SMA
 # ==============================================================================
@@ -186,7 +105,7 @@ def validar_reversion_sma(exchange, symbol, es_long, precio_actual):
         limit_velas = SMA_LARGA_PERIODO + 10
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_SMA, limit=limit_velas)
         if len(ohlcv) < SMA_LARGA_PERIODO:
-            return False, f"insuficientes velas para calcular SMA"
+            return False, f"insuficientes velas para calcular SMA {SMA_LARGA_PERIODO}"
         
         cierres = [x[4] for x in ohlcv]
         sma_20 = sum(cierres[-SMA_CORTA_PERIODO:]) / SMA_CORTA_PERIODO
@@ -194,11 +113,13 @@ def validar_reversion_sma(exchange, symbol, es_long, precio_actual):
         distancia_sma_pct = ((precio_actual - sma_20) / sma_20) * 100
 
         if es_long:
+            # Para LONG: El precio debe estar muy por debajo de la SMA 20 (sobrevendido)
             if distancia_sma_pct <= -SOBREEXTENSION_MIN_PCT:
                 return True, f"LONG Reversión verificado | Precio sobreextendido abajo de SMA20 ({distancia_sma_pct:.2f}%)"
             else:
                 return False, f"LONG rechazado: No suficientemente sobreextendido ({distancia_sma_pct:.2f}% vs req <= -{SOBREEXTENSION_MIN_PCT}%)"
         else:
+            # Para SHORT: El precio debe estar muy por encima de la SMA 20 (sobrecomprado)
             if distancia_sma_pct >= SOBREEXTENSION_MIN_PCT:
                 return True, f"SHORT Reversión verificado | Precio sobreextendido arriba de SMA20 (+{distancia_sma_pct:.2f}%)"
             else:
@@ -262,6 +183,12 @@ def contar_posiciones_por_lado(exchange):
 
     try:
         ordenes = exchange.fetch_open_orders(params={'subType': 'linear'})
+        if not ordenes:
+            try:
+                ordenes = exchange.fapiPrivateGetOpenOrders()
+            except Exception:
+                pass
+
         for o in ordenes:
             if not _es_orden_de_entrada(o):
                 continue
@@ -387,7 +314,7 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
 
     trailing = calcular_trailing_protector(precio_entrada, precio_stop)
     if not trailing:
-        print("   ⚠️  No se pudo calcular el trailing. Se omite la operación.")
+        print("   ⚠️  No se pudo calcular el trailing (precio de entrada = stop). Se omite la operación.")
         return False
 
     try:
@@ -395,9 +322,11 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
     except Exception as e:
         cantidad_ok, precio_ok, error = None, None, f"no se pudo validar contra el exchange ({e})"
 
-    print(f"   🤖 Plan de ejecución Reversión Muro: LIMIT {lado_entrada.upper()} {cantidad_ok} {market_info['base']} @ {precio_entrada}")
-    print(f"   🤖 SL: {precio_stop}")
-    print(f"   🤖 Trailing protector → activación {trailing['activation_price']:.8f} | callback {trailing['callback_rate_pct_ajustado']}%")
+    print(f"   🤖 Plan de ejecución Reversión: LIMIT {lado_entrada.upper()} {cantidad_ok} {market_info['base']} @ {precio_entrada}")
+    print(f"   🤖 SL (se arma cuando la posición exista): {precio_stop}")
+    print(f"   🤖 Trailing protector → activación {trailing['activation_price']:.8f} "
+          f"| callback {trailing['callback_rate_pct_ajustado']}% "
+          f"(protege ≈ {trailing['protegido_1_1']:.8f})")
 
     if error:
         print(f"   ⏭️  Se omite {symbol}: {error}.\n")
@@ -408,15 +337,15 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
         return True
 
     if not BINANCE_API_KEY or not BINANCE_API_SECRET:
-        print("   ❌ Faltan BINANCE_API_KEY / BINANCE_API_SECRET en config.py.\n")
+        print("   ❌ Faltan BINANCE_API_KEY / BINANCE_API_SECRET en config.py. No se puede operar.\n")
         return False
 
     try:
         exchange.set_leverage(LEVERAGE, symbol)
-        client_id = f"rev{int(time.time() * 1000)}"
+        client_id = f"{PREFIJO_ORDEN}{int(time.time() * 1000)}"
         orden_entrada = exchange.create_order(symbol, 'limit', lado_entrada, cantidad_ok, precio_ok,
                                               params={'clientOrderId': client_id})
-        print(f"   ✅ Orden de entrada en muro enviada. id={orden_entrada.get('id')}")
+        print(f"   ✅ Orden de entrada enviada. id={orden_entrada.get('id')}")
     except Exception as e:
         print(f"   ❌ Error mandando la orden de entrada: {e}\n")
         tg_enviar(f"❌ ERROR mandando entrada en {symbol}: {e}")
@@ -432,9 +361,10 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
             'protegido_1_1': trailing['protegido_1_1'],
             'cantidad_str': exchange.amount_to_precision(symbol, cantidad_ok),
         }
-    print(f"   ⏳ SL/Trailing pendientes de activación automática al llenarse la entrada.\n")
-    tg_enviar(f"📥 ENTRADA REVERSIÓN EN MURO: {symbol} {'LONG' if es_long else 'SHORT'}\n"
-              f"LIMIT: {precio_ok} | Cantidad: {cantidad_ok}")
+    print(f"   ⏳ SL/Trailing quedaron pendientes: se colocan automáticamente en cuanto la entrada se llene.\n")
+    tg_enviar(f"📥 ENTRADA ENVIADA: {symbol} {'LONG' if es_long else 'SHORT'}\n"
+              f"LIMIT: {precio_ok} | Cantidad: {cantidad_ok}\n"
+              f"SL/Trailing se arman solos en cuanto se llene la entrada.")
 
     return True
 
@@ -446,7 +376,13 @@ def verificar_proteccion_activa(exchange, symbol, simbolo_binance):
     try:
         resp_algo = _binance_signed_request('GET', '/fapi/v1/openAlgoOrders', {'symbol': simbolo_binance}, BINANCE_API_KEY, BINANCE_API_SECRET)
         ordenes_algo = resp_algo.get('data', []) if isinstance(resp_algo, dict) else resp_algo
-        return len(ordenes_algo) > 0
+        
+        tiene_algo = len(ordenes_algo) > 0
+        if tiene_algo:
+            PROTECCIONES_ENVIADAS.add(symbol)
+            return True
+            
+        return False
     except Exception:
         return symbol in PROTECCIONES_ENVIADAS
 
@@ -479,7 +415,7 @@ def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
                     }
                     break
         except Exception as e:
-            print(f"   ⚠️ Error reconstruyendo protección para {symbol}: {e}")
+            print(f"   ⚠️ No se pudo auto-reconstruir información de protección para {symbol}: {e}")
 
     if not info:
         return False
@@ -499,7 +435,9 @@ def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
             'priceProtect': 'true',
         }, BINANCE_API_KEY, BINANCE_API_SECRET)
         sl_exitoso = True
-    except Exception:
+        print(f"   ✅ SL colocado correctamente para {symbol}.")
+    except Exception as e:
+        print(f"   ⚠️ Fallo/Ya existe STOP_MARKET en {symbol}: {e}")
         sl_exitoso = True
 
     trailing_exitoso = False
@@ -516,13 +454,19 @@ def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
             'reduceOnly': 'true',
         }, BINANCE_API_KEY, BINANCE_API_SECRET)
         trailing_exitoso = True
-    except Exception:
-        pass
+        print(f"   ✅ Trailing colocado correctamente para {symbol}.")
+    except Exception as e:
+        print(f"   ⚠️ Fallo al colocar TRAILING_STOP_MARKET en {symbol}: {e}")
 
     if sl_exitoso or trailing_exitoso:
         PROTECCIONES_ENVIADAS.add(symbol)
         with _lock_proteccion:
             PROTECCION_PENDIENTE.pop(symbol, None)
+
+        tg_enviar(f"🎯 PROTECCIÓN ARMADA: {symbol}\n"
+                  f"SL: {info['precio_stop']}\n"
+                  f"Trailing → activación {info['activation_price']:.6f} "
+                  f"(callback {info['callback_rate']}%, protege ≈ {info['protegido_1_1']:.6f})")
         return True
     
     return False
@@ -531,17 +475,30 @@ def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
 PREFIJO_ORDEN = "rev"   
 
 
+def _ruta(nombre):
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), nombre)
+
+
+ARCHIVO_AJUSTES = _ruta("ajustes_bot.json")   
+ARCHIVO_ESTADO = _ruta("estado_bot.json")     
+
 AJUSTES_EDITABLES = {
     'CAPITAL_DISPONIBLE': (float, 1, 1_000_000, "Capital disponible (USDT)"),
     'RIESGO_PCT': (float, 0.1, 50, "% del capital que se arriesga por operación"),
     'LEVERAGE': (int, 1, 125, "Apalancamiento"),
     'MAX_OPERACIONES_ABIERTAS': (int, 1, 20, "Operaciones simultáneas máximas"),
+    'SEGUNDOS_ESPERA_CUPO_LLENO': (float, 5, 3600, "Segundos entre revisiones cuando el cupo está lleno"),
     'MIN_RATIO': (float, 0.5, 100, "Ratio R:R mínimo (2 = 1:2)"),
     'ACTIVACION_TRAILING_R': (float, 1.05, 10, "Activación del trailing en múltiplos de R"),
-    'MINUTOS_MAX_ORDEN_PENDIENTE': (float, 0, 1440, "Minutos antes de cancelar orden límite (0 = nunca)"),
+    'MINUTOS_MAX_ORDEN_PENDIENTE': (float, 0, 1440, "Minutos antes de cancelar una orden límite sin llenar (0 = nunca)"),
     'SOBREEXTENSION_MIN_PCT': (float, 1.0, 30.0, "% Distancia mínima sobreextensión SMA"),
     'VOLUMEN_MINIMO_24H_USDT': (float, 0, 1_000_000_000, "Volumen mínimo en 24h (USDT)"),
     'MODO_REVERSION_EXTREMA': (bool, None, None, "Modo reversión extrema (true/false)"),
+    'PAUSA_ENTRE_PARES_SEG': (float, 0, 10, "Pausa entre pares (seg)"),
+    'PAUSA_ERROR_RED_SEG': (float, 1, 300, "Pausa tras error de red (seg)"),
+    'PESO_RATIO': (float, 0, 1, "Peso del ratio R:R en el ranking"),
+    'PESO_VOLUMEN': (float, 0, 1, "Peso del volumen del muro en el ranking"),
+    'PESO_MOVIMIENTO_SL': (float, 0, 1, "Peso del % hasta el SL en el ranking"),
     'EJECUTAR_ORDENES_REALES': (bool, None, None, "Mandar órdenes reales (true/false)"),
 }
 
@@ -631,8 +588,7 @@ def _tg_api(metodo, payload=None, timeout=15):
 MENU_TECLADO_FIJO = {
     'keyboard': [
         [{'text': '⚙️ Ajustes'}, {'text': '📌 Posiciones'}],
-        [{'text': '📊 PnL'}, {'text': '📈 Métricas'}],
-        [{'text': '📡 Estado'}]
+        [{'text': '📊 PnL'}, {'text': '📡 Estado'}]
     ],
     'resize_keyboard': True,
     'persistent': True
@@ -642,12 +598,19 @@ MENU_TECLADO_FIJO = {
 def tg_enviar(texto, botones=None):
     if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
         return
-    payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': texto, 'parse_mode': 'Markdown'}
+    payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': texto}
     if botones:
         payload['reply_markup'] = {'inline_keyboard': botones}
     else:
         payload['reply_markup'] = MENU_TECLADO_FIJO
     _tg_api('sendMessage', payload)
+
+
+def tg_editar(chat_id, message_id, texto, botones=None):
+    payload = {'chat_id': chat_id, 'message_id': message_id, 'text': texto}
+    if botones:
+        payload['reply_markup'] = {'inline_keyboard': botones}
+    _tg_api('editMessageText', payload)
 
 
 def _autorizado(chat_id):
@@ -658,7 +621,7 @@ def panel_ajustes():
     riesgo_usd = CAPITAL_DISPONIBLE * RIESGO_PCT / 100
     
     texto = (
-        "⚙️ *VALORES CONFIGURADOS (MODO REVERSIÓN)*\n"
+        "⚙️ VALORES ACTUALES CONFIGURADOS\n"
         "───────────────────────────────\n"
         f"💰 Capital Disponible: {CAPITAL_DISPONIBLE:g} USDT\n"
         f"⚠️ Riesgo por Operación: {RIESGO_PCT:g}% (≈ {riesgo_usd:.2f} USDT)\n"
@@ -667,15 +630,15 @@ def panel_ajustes():
         f"📈 Volumen Mínimo 24h: {VOLUMEN_MINIMO_24H_USDT:,.0f} USDT\n"
         f"🔄 Modo Reversión Extrema: {'ACTIVADO' if MODO_REVERSION_EXTREMA else 'DESACTIVADO'}\n"
         f"📐 Sobreextensión Mínima: {SOBREEXTENSION_MIN_PCT:g}%\n"
-        f"🎯 Activación Trailing: {ACTIVACION_TRAILING_R}R\n"
         "───────────────────────────────\n"
-        "Toca un botón para cambiar el parámetro:"
+        "Toca un botón para cambiar el parámetro e ingresa el nuevo número:"
     )
     
     botones = [
         [{'text': '💰 Cambiar Capital', 'callback_data': 'pedir|CAPITAL_DISPONIBLE'},
          {'text': '⚠️ Cambiar Riesgo %', 'callback_data': 'pedir|RIESGO_PCT'}],
-        [{'text': '📐 Sobreextensión %', 'callback_data': 'pedir|SOBREEXTENSION_MIN_PCT'},
+        [{'text': '📈 Cambiar Volumen Mín', 'callback_data': 'pedir|VOLUMEN_MINIMO_24H_USDT'},
+         {'text': '📐 Sobreextensión %', 'callback_data': 'pedir|SOBREEXTENSION_MIN_PCT'},
          {'text': '🔄 Reversión True/False', 'callback_data': 'pedir|MODO_REVERSION_EXTREMA'}],
     ]
     return texto, botones
@@ -690,9 +653,15 @@ def _tg_callback(cq):
     if partes[0] == 'pedir' and len(partes) == 2 and partes[1] in AJUSTES_EDITABLES:
         var_nombre = partes[1]
         USUARIO_ESPERANDO_DATO[chat_id] = var_nombre
+        
         _, minimo, maximo, desc = AJUSTES_EDITABLES[var_nombre]
-        tg_enviar(f"✍️ Escribe el nuevo número para *{var_nombre}* ({desc}):")
-        respuesta = f"Esperando valor"
+        rango_txt = f"entre {minimo:g} y {maximo:g}" if minimo is not None and maximo is not None else ""
+        
+        tg_enviar(f"✍️ Escribe el nuevo número para:\n\n"
+                  f"👉 *{var_nombre}* ({desc})\n"
+                  f"Valor actual: {globals()[var_nombre]}\n"
+                  f"{f'Rango: {rango_txt}' if rango_txt else ''}")
+        respuesta = f"Esperando valor para {var_nombre}"
 
     _tg_api('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': respuesta[:150]})
 
@@ -700,7 +669,7 @@ def _tg_callback(cq):
 def _tg_set_directo(nombre_txt, valor_txt):
     nombre = resolver_nombre_ajuste(nombre_txt)
     if not nombre:
-        tg_enviar(f"❌ Parámetro desconocido.")
+        tg_enviar(f"❌ No existe el parámetro '{nombre_txt}'.")
         return
     tipo = AJUSTES_EDITABLES[nombre][0]
     try:
@@ -708,7 +677,7 @@ def _tg_set_directo(nombre_txt, valor_txt):
         aplicar_ajuste(nombre, valor)
         tg_enviar(f"✅ Guardado: {nombre} = {globals()[nombre]}")
     except ValueError as e:
-        tg_enviar(f"❌ Error: {e}")
+        tg_enviar(f"❌ Error guardando el valor: {e}")
 
 
 def _tg_procesar(upd):
@@ -719,6 +688,7 @@ def _tg_procesar(upd):
             _tg_callback(cq)
         else:
             _tg_api('answerCallbackQuery', {'callback_query_id': cq['id']})
+            
     elif 'message' in upd:
         m = upd['message']
         chat_id = m['chat']['id']
@@ -740,11 +710,13 @@ def _tg_procesar(upd):
             tg_enviar(texto_posiciones())
         elif texto in ('📊 PnL', '/pnl'):
             tg_enviar(texto_pnl())
-        elif texto in ('📈 Métricas', '/metricas'):
-            tg_enviar(resumen_metricas())
         elif texto in ('📡 Estado', '/estado'):
-            tg_enviar(f"📡 *ESTADO DEL BOT*\nCapital {CAPITAL_DISPONIBLE:g} USDT | Riesgo {RIESGO_PCT:g}%\n"
-                      f"Reversión Extrema: {'ON' if MODO_REVERSION_EXTREMA else 'OFF'} ({SOBREEXTENSION_MIN_PCT:g}%)\n\n"
+            modo = "TESTNET" if USAR_TESTNET else "BINANCE REAL"
+            tg_enviar(f"📡 ESTADO DEL BOT\nModo: {modo}\n"
+                      f"Capital {CAPITAL_DISPONIBLE:g} USDT | Riesgo {RIESGO_PCT:g}% | Leverage {LEVERAGE}x\n"
+                      f"Cupos: {MAX_OPERACIONES_ABIERTAS} operaciones máx | Pendientes: {MINUTOS_MAX_ORDEN_PENDIENTE:g} min\n"
+                      f"Volumen Mínimo: {VOLUMEN_MINIMO_24H_USDT:,.0f} USDT\n"
+                      f"Reversión Extrema: {'ON' if MODO_REVERSION_EXTREMA else 'OFF'} ({SOBREEXTENSION_MIN_PCT:g}% dist min)\n\n"
                       f"{texto_posiciones()}\n\n{texto_pnl()}")
 
 
@@ -752,15 +724,53 @@ def hilo_telegram():
     if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
         return
     offset = None
+    r = _tg_api('getUpdates', {'offset': -1, 'timeout': 0})
+    if r and r.get('result'):
+        offset = r['result'][-1]['update_id'] + 1
+
+    aviso_409_mostrado = False
+
     while True:
         try:
+            payload = {'timeout': 20, 'allowed_updates': ['message', 'callback_query']}
+            if offset:
+                payload['offset'] = offset
             resp = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates",
-                                 json={'timeout': 20, 'offset': offset}, timeout=30).json()
+                                 json=payload, timeout=30).json()
+            if not resp.get('ok'):
+                if resp.get('error_code') == 409:
+                    if not aviso_409_mostrado:
+                        print("⚠️ Telegram: liberando conexión anterior...")
+                        aviso_409_mostrado = True
+                time.sleep(3)
+                continue
+            if aviso_409_mostrado:
+                aviso_409_mostrado = False
             for upd in resp.get('result', []):
                 offset = upd['update_id'] + 1
-                _tg_procesar(upd)
+                try:
+                    _tg_procesar(upd)
+                except Exception as e:
+                    print(f"⚠️ Error procesando mensaje de Telegram: {e}")
         except Exception:
             time.sleep(5)
+
+
+TIPOS_PNL = ('REALIZED_PNL', 'COMMISSION', 'FUNDING_FEE')
+
+
+def obtener_income(desde_ms):
+    registros = []
+    inicio = desde_ms
+    while True:
+        lote = _binance_signed_request('GET', '/fapi/v1/income',
+                                       {'startTime': inicio, 'limit': 1000},
+                                       BINANCE_API_KEY, BINANCE_API_SECRET)
+        registros.extend(lote)
+        if len(lote) < 1000:
+            break
+        inicio = int(lote[-1]['time']) + 1
+    return registros
 
 
 def calcular_pnl_periodos():
@@ -787,12 +797,12 @@ def calcular_pnl_periodos():
 
 def texto_pnl():
     if not (BINANCE_API_KEY and BINANCE_API_SECRET):
-        return "📊 PnL no disponible."
+        return "📊 PnL no disponible: faltan API keys."
     try:
         p = calcular_pnl_periodos()
     except Exception as e:
-        return f"📊 Error: {e}"
-    return ("📊 *PnL REAL*\n"
+        return f"📊 No pude leer el historial: {e}"
+    return ("📊 PnL REAL\n"
             f"📅 Hoy:    {p['diario']:+,.2f} USDT\n"
             f"🗓️ Semana: {p['semanal']:+,.2f} USDT\n"
             f"📆 Mes:    {p['mensual']:+,.2f} USDT")
@@ -812,12 +822,28 @@ POSICIONES_ACTUALES = {}
 ORDENES_PENDIENTES = []
 
 
+def _cargar_estado():
+    try:
+        with open(ARCHIVO_ESTADO, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _guardar_estado(estado):
+    try:
+        with open(ARCHIVO_ESTADO, 'w', encoding='utf-8') as f:
+            json.dump(estado, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+
 def _leer_posiciones(exchange):
     res = {}
     for p in exchange.fetch_positions():
         try:
             contratos = float(p.get('contracts') or 0)
-        except Exception:
+        except (TypeError, ValueError):
             contratos = 0.0
         if contratos == 0:
             continue
@@ -859,60 +885,60 @@ def texto_posiciones():
         pos = dict(POSICIONES_ACTUALES)
         pend = list(ORDENES_PENDIENTES)
     if not pos and not pend:
-        return "📌 Sin operaciones abiertas ni pendientes."
+        return "📌 Sin operaciones abiertas ni órdenes pendientes."
     lineas = []
     if pos:
-        lineas.append(f"📌 *ABIERTAS ({len(pos)})*")
+        lineas.append(f"📌 OPERACIONES ABIERTAS ({len(pos)})")
         for p in pos.values():
-            lineas.append(f"• {p['symbol']} {p['lado'].upper()} | {p['contratos']:g} @ {p['entrada']}")
+            pnl = p.get('pnl_no_realizado')
+            pnl_txt = f" | PnL no realizado {float(pnl):+,.2f} USDT" if pnl is not None else ""
+            lineas.append(f"• {p['symbol']} {str(p['lado']).upper()} | {p['contratos']:g} contratos | entrada {p['entrada']}{pnl_txt}")
     if pend:
-        lineas.append(f"\n⏳ *PENDIENTES MODO REVERSIÓN ({len(pend)})*")
+        lineas.append(f"\n⏳ ÓRDENES DE ENTRADA PENDIENTES ({len(pend)})")
         for o in pend:
-            lineas.append(f"• {o['symbol']} {o['side'].upper()} {o['amount']:g} @ {o['price']}")
+            lineas.append(f"• {o['symbol']} {str(o['side']).upper()} {o['amount']:g} @ {o['price']}")
     return "\n".join(lineas)
 
 
 def hilo_monitor(exchange):
     global POSICIONES_ACTUALES, ORDENES_PENDIENTES
-    conocidas = {}
+    conocidas = _cargar_estado().get('posiciones', {})
     primera = True
 
     while True:
         try:
-            actuales = _leer_posiciones(exchange)
+            actuales = _leer_posiciones(exchange)   
             ahora_ms = int(time.time() * 1000)
 
             for sym, p in actuales.items():
                 if sym not in conocidas:
-                    apertura = ahora_ms if primera else ahora_ms - 60000
+                    apertura = ahora_ms if primera else ahora_ms - (INTERVALO_MONITOR_SEG * 2 + 5) * 1000
                     conocidas[sym] = {'id': p['id'], 'lado': p['lado'], 'contratos': p['contratos'],
-                                      'entrada': p['entrada'], 'apertura_ms': apertura}
-                    tg_enviar(f"🟢 OPERACIÓN REVERSIÓN ABIERTA\n{sym} {p['lado'].upper()} @ {p['entrada']}")
+                                      'entrada': p['entrada'], 'apertura_ms': apertura, 'aprox': primera}
+                    cabecera = "📌 POSICIÓN DETECTADA AL INICIAR" if primera else "🟢 OPERACIÓN ABIERTA"
+                    tg_enviar(f"{cabecera}\n{sym} {str(p['lado']).upper()}\nContratos: {p['contratos']:g} | Entrada: {p['entrada']}")
                 
                 if EJECUTAR_ORDENES_REALES:
                     if not verificar_proteccion_activa(exchange, sym, p['id']):
+                        print(f"   ⚠️ Posición detectada sin protección en {sym}. Armando SL y Trailing...")
                         colocar_proteccion_pendiente(exchange, sym, p['id'])
 
             for sym in list(conocidas):
                 if sym not in actuales:
                     info = conocidas.pop(sym)
                     PROTECCIONES_ENVIADAS.discard(sym)
-                    time.sleep(4)
+                    time.sleep(4)  
                     try:
                         pnl_op = _pnl_operacion(info['id'], info['apertura_ms'])
-                    except Exception:
+                        pnl_txt = f"{pnl_op:+,.2f} USDT"
+                    except Exception as e:
+                        pnl_txt = f"no disponible ({e})"
                         pnl_op = 0.0
-                    
                     limpiar_ordenes_simbolo(exchange, sym, info['id'])
                     icono = "✅" if pnl_op >= 0 else "❌"
-                    
-                    registrar_operacion_historial({
-                        'timestamp': datetime.now(TZ_LOCAL).isoformat(),
-                        'symbol': sym,
-                        'lado': info['lado'],
-                        'pnl': pnl_op
-                    })
-                    tg_enviar(f"{icono} OPERACIÓN CERRADA\n{sym} PnL: {pnl_op:+,.2f} USDT\n\n{texto_pnl()}")
+                    tg_enviar(f"{icono} OPERACIÓN CERRADA\n{sym} {str(info['lado']).upper()}\nEntrada: {info['entrada']}\nPnL: {pnl_txt}\n\n{texto_pnl()}")
+
+            _guardar_estado({'posiciones': conocidas})
 
             pendientes = []
             try:
@@ -926,7 +952,7 @@ def hilo_monitor(exchange):
                             with _lock_proteccion:
                                 PROTECCION_PENDIENTE.pop(o['symbol'], None)
                             pendientes.remove(o)
-                            tg_enviar(f"⌛ ORDEN CANCELADA: {o['symbol']}\nSuperó el tiempo límite en el muro.")
+                            tg_enviar(f"⌛ ORDEN CANCELADA: {o['symbol']}\nSuperó el límite de {MINUTOS_MAX_ORDEN_PENDIENTE:g} min sin llenarse.")
             except Exception:
                 pass
 
@@ -934,20 +960,30 @@ def hilo_monitor(exchange):
                 POSICIONES_ACTUALES = actuales
                 ORDENES_PENDIENTES = pendientes
             primera = False
+
         except Exception as e:
-            print(f"⚠️ Monitor: {e}")
+            print(f"⚠️ Monitor de posiciones: {e}")
+
         time.sleep(INTERVALO_MONITOR_SEG)
 
 
 def calcular_entrada(capital, riesgo_pct, precio_entrada, precio_stop, leverage):
-    diff = abs(precio_entrada - precio_stop)
-    if precio_stop <= 0 or diff <= 0:
+    numero_mayor = max(precio_entrada, precio_stop)
+    numero_menor = min(precio_entrada, precio_stop)
+    diff = numero_mayor - numero_menor
+
+    if numero_menor <= 0:
         return None
-    riesgo_fraccion = diff / precio_entrada
+
+    riesgo_fraccion = diff / numero_menor
+    if riesgo_fraccion <= 0:
+        return None
+
     perdida_usd = capital * (riesgo_pct / 100)
     capital_a_usar = perdida_usd / riesgo_fraccion
     cantidad_monedas = capital_a_usar / precio_entrada
     margen_necesario = capital_a_usar / leverage
+
     return {
         'movimiento_pct': riesgo_fraccion * 100,
         'perdida_usd': perdida_usd,
@@ -965,56 +1001,98 @@ def agrupar_precio(precio, paso):
 def agrupar_libro_ordenes(orders, paso):
     if paso <= 0:
         return {}
+
     bloques_agrupados = {}
     for precio, vol in orders:
         bloque = agrupar_precio(precio, paso)
         if bloque not in bloques_agrupados:
             bloques_agrupados[bloque] = {'vol_total': 0.0, 'precio_pico': precio, 'vol_pico': vol}
+
         bloques_agrupados[bloque]['vol_total'] += vol
+
         if vol > bloques_agrupados[bloque]['vol_pico']:
             bloques_agrupados[bloque]['vol_pico'] = vol
             bloques_agrupados[bloque]['precio_pico'] = precio
+
     return bloques_agrupados
 
 
 def obtener_muro_maximo_volumen(bloques_agrupados):
     if not bloques_agrupados:
         return None, 0.0
+
     bloque_ganador = max(bloques_agrupados.items(), key=lambda item: item[1]['vol_total'])
     datos = bloque_ganador[1]
     return datos['precio_pico'], datos['vol_total']
 
 
-def obtener_dos_ultimos_niveles_adaptativos(market_info):
-    paso_base = 0.0001
-    for f in market_info.get('info', {}).get('filters', []):
+def obtener_dos_ultimos_niveles_adaptativos(market_info, precio_referencia):
+    paso_base = None
+
+    filters = market_info.get('info', {}).get('filters', [])
+    for f in filters:
         if f.get('filterType') == 'PRICE_FILTER':
-            paso_base = float(f.get('tickSize', 0.0001))
+            paso_base = float(f.get('tickSize', 0))
             break
-    niveles = [round(paso_base, 8), round(paso_base * 10, 8), round(paso_base * 100, 8)]
-    niveles = sorted(list(set(niveles)))
-    return niveles[-2], niveles[-1]
+
+    if not paso_base or paso_base <= 0:
+        tick_size = market_info['precision']['price']
+        if isinstance(tick_size, int):
+            paso_base = 10 ** (-tick_size)
+        else:
+            paso_base = float(tick_size)
+
+    niveles_posibles = [
+        round(paso_base, 8),
+        round(paso_base * 10, 8),
+        round(paso_base * 100, 8),
+        round(paso_base * 1000, 8)
+    ]
+
+    niveles_unicos = sorted(list(set(niveles_posibles)))
+
+    return niveles_unicos[-2], niveles_unicos[-1]
 
 
 def obtener_solo_perpetuos_usdt(exchange):
     while True:
         try:
+            print("🔄 Cargando lista de mercados de Binance...")
             markets = exchange.load_markets()
-            perpetuos = [s for s, m in markets.items() if m.get('quote') == 'USDT' and m.get('swap') and m.get('active', True)]
+            perpetuos = []
+            for symbol, market in markets.items():
+                if (market.get('quote') == 'USDT' and 
+                    (market.get('type') == 'swap' or market.get('swap') is True) and 
+                    market.get('linear') is True and 
+                    market.get('active', True) and 
+                    market.get('expiry') is None):
+                    perpetuos.append(symbol)
+            
+            print(f"✅ Se encontraron {len(perpetuos)} contratos PERPETUOS activos en USDT-M.\n")
             return perpetuos
         except Exception:
+            print(f"⚠️ Error de conexión al cargar mercados. Reintentando en {PAUSA_ERROR_RED_SEG}s...")
             time.sleep(PAUSA_ERROR_RED_SEG)
 
 
 def evaluar_y_ejecutar_candidatas(exchange, candidatas_ordenadas, total_ocupado, long_ocupado, short_ocupado):
     ejecutadas = 0
     for i, c in enumerate(candidatas_ordenadas, 1):
+        lado = 'LONG' if c['es_long'] else 'SHORT'
+        print(f"   #{i} {c['symbol']} {lado} | score={c['score']:.3f} | ratio=1:{c['ratio']:.2f} "
+              f"| vol={c['volumen_entrada']:,.0f} | mov_sl={c['pct_movimiento_sl']:.2f}%")
+
         if total_ocupado >= MAX_OPERACIONES_ABIERTAS:
+            print(f"      ⏹️  Cupo total lleno ({total_ocupado}/{MAX_OPERACIONES_ABIERTAS}): no se manda nada más.")
             break
-        cupo_ok, _ = hay_cupo(total_ocupado, long_ocupado, short_ocupado, c['es_long'])
+
+        cupo_ok, motivo = hay_cupo(total_ocupado, long_ocupado, short_ocupado, c['es_long'])
         if not cupo_ok:
+            print(f"      ⏭️  Se omite: {motivo}. Se sigue buscando una candidata del otro lado.")
             continue
+
         if tiene_posicion_u_orden_abierta(exchange, c['symbol']):
+            print(f"      ⏭️  Ya hay posición/orden abierta en {c['symbol']}, se omite.")
             continue
 
         if ejecutar_operacion(exchange, c['symbol'], c['market_info'], c['es_long'],
@@ -1025,29 +1103,25 @@ def evaluar_y_ejecutar_candidatas(exchange, candidatas_ordenadas, total_ocupado,
                 long_ocupado += 1
             else:
                 short_ocupado += 1
+
     return ejecutadas, total_ocupado, long_ocupado, short_ocupado
-
-
-def hay_cupo(total_ocupado, long_ocupado, short_ocupado, es_long):
-    if total_ocupado >= MAX_OPERACIONES_ABIERTAS:
-        return False, "lleno"
-    max_por_lado = math.ceil(MAX_OPERACIONES_ABIERTAS / 2)
-    ocupado_lado = long_ocupado if es_long else short_ocupado
-    if ocupado_lado >= max_por_lado:
-        return False, "lado lleno"
-    return True, None
 
 
 def escanear_perpetuos_binance():
     cargar_ajustes()  
+
     exchange = ccxt.binance({
-        'apiKey': BINANCE_API_KEY, 'secret': BINANCE_API_SECRET,
+        'apiKey': BINANCE_API_KEY,
+        'secret': BINANCE_API_SECRET,
         'enableRateLimit': True,
         'options': {
             'defaultType': 'future',
             'warnOnFetchOpenOrdersWithoutSymbol': False,
-            'fetchOpenOrders': {'warnWithoutSymbol': False},
-            'adjustForTimeDifference': True
+            'fetchOpenOrders': {
+                'warnWithoutSymbol': False,
+            },
+            'adjustForTimeDifference': True,
+            'recvWindow': 10000,
         }
     })
     if USAR_TESTNET:
@@ -1056,17 +1130,27 @@ def escanear_perpetuos_binance():
     if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
         threading.Thread(target=hilo_telegram, daemon=True).start()
         threading.Thread(target=hilo_monitor, args=(exchange,), daemon=True).start()
-        tg_enviar(f"🚀 Escáner Modo Reversión Extrema Activo (Con Trailing Stop)")
+        modo = "TESTNET" if USAR_TESTNET else "BINANCE REAL"
+        tg_enviar(f"🚀 Escáner iniciado ({modo})\n"
+                  f"Modo Reversión Extrema: {'ACTIVADO' if MODO_REVERSION_EXTREMA else 'DESACTIVADO'} (sobreextensión >={SOBREEXTENSION_MIN_PCT}%)\n"
+                  f"Volumen mínimo 24h: {VOLUMEN_MINIMO_24H_USDT:,.0f} USDT\n"
+                  f"Envío de órdenes: {'ACTIVADO' if EJECUTAR_ORDENES_REALES else 'DESACTIVADO (solo simula)'}")
+    else:
+        print("ℹ️  TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID no configurados en config.py.")
 
     pares = obtener_solo_perpetuos_usdt(exchange)
-    print(f"🚀 Escáner Modo Reversión Extrema Activo | {len(pares)} Pares")
+    print(f"🚀 Escáner iniciado | {len(pares)} Perpetuos USDT | Modo Reversión Extrema + Volumen")
+    print(f"ℹ️  {platform.system()} | Python {sys.version.split()[0]} | ccxt {ccxt.__version__} | "
+          f"{'TESTNET' if USAR_TESTNET else 'BINANCE REAL'} | órdenes reales: {'SÍ' if EJECUTAR_ORDENES_REALES else 'NO'} | "
+          f"cupo máx: {MAX_OPERACIONES_ABIERTAS}")
     print("=" * 75)
     
     while True:
         try:
-            cupo_ok, total_ocupado, long_ocupado, short_ocupado, detalle = contar_posiciones_por_lado(exchange)
-            if not cupo_ok:
-                print(f"🟡 [{time.strftime('%H:%M:%S' )}] No se pudo verificar el cupo con seguridad. Se espera {SEGUNDOS_ESPERA_CUPO_LLENO:g}s.")
+            cupo_verificado, total_ocupado, long_ocupado, short_ocupado, detalle = contar_posiciones_por_lado(exchange)
+            if not cupo_verificado:
+                print(f"🟡 [{time.strftime('%H:%M:%S')}] No se pudo verificar el cupo con seguridad. "
+                      f"Se espera {SEGUNDOS_ESPERA_CUPO_LLENO:g}s y se reintenta.")
                 time.sleep(SEGUNDOS_ESPERA_CUPO_LLENO)
                 continue
             if total_ocupado >= MAX_OPERACIONES_ABIERTAS:
@@ -1077,95 +1161,168 @@ def escanear_perpetuos_binance():
                 continue
             print(f"🟢 [{time.strftime('%H:%M:%S')}] Cupo {total_ocupado}/{MAX_OPERACIONES_ABIERTAS} "
                   f"(LONG {long_ocupado}, SHORT {short_ocupado}): "
-                  f"{', '.join(detalle) if detalle else 'nada abierto'}. Escaneando modo reversión...")
+                  f"{', '.join(detalle) if detalle else 'nada abierto'}. "
+                  f"Escaneando modo reversión extrema para llenar {MAX_OPERACIONES_ABIERTAS - total_ocupado} cupo(s)...")
 
+            alerta_encontrada = False
             señales_candidatas = []
             
             for symbol in pares:
                 try:
                     market_info = exchange.market(symbol)
-                    ticker = exchange.fetch_ticker(symbol)
-                    volumen_24h = ticker.get('quoteVolume', 0) or 0
-                    if volumen_24h < VOLUMEN_MINIMO_24H_USDT:
+
+                    # 1. FILTRADO PREVIO POR VOLUMEN 24H
+                    try:
+                        ticker = exchange.fetch_ticker(symbol)
+                        volumen_24h = ticker.get('quoteVolume', 0) or 0
+                        if volumen_24h < VOLUMEN_MINIMO_24H_USDT:
+                            continue
+                    except Exception:
                         continue
 
                     precio_actual = ticker.get('last') or ticker.get('close')
                     if not precio_actual:
                         continue
 
-                    order_book = exchange.fetch_order_book(symbol, limit=200)
-                    bids, asks = order_book['bids'], order_book['asks']
+                    order_book = exchange.fetch_order_book(symbol, limit=500)
+                    bids = order_book['bids']
+                    asks = order_book['asks']
+                    
                     if not bids or not asks:
                         continue
 
-                    paso_penultimo, paso_ultimo = obtener_dos_ultimos_niveles_adaptativos(market_info)
-                    
-                    bids_pen = agrupar_libro_ordenes(bids, paso_penultimo)
-                    asks_pen = agrupar_libro_ordenes(asks, paso_penultimo)
-                    compra_1, vol_c1 = obtener_muro_maximo_volumen(bids_pen)
-                    venta_1, vol_v1 = obtener_muro_maximo_volumen(asks_pen)
+                    precio_ref = (bids[0][0] + asks[0][0]) / 2.0
+
+                    paso_penultimo, paso_ultimo = obtener_dos_ultimos_niveles_adaptativos(market_info, precio_referencia=precio_ref)
+
+                    bids_penultimo = agrupar_libro_ordenes(bids, paso_penultimo)
+                    asks_penultimo = agrupar_libro_ordenes(asks, paso_penultimo)
+
+                    compra_1, vol_c1 = obtener_muro_maximo_volumen(bids_penultimo)
+                    venta_1, vol_v1 = obtener_muro_maximo_volumen(asks_penultimo)
 
                     if not compra_1 or not venta_1 or compra_1 >= venta_1:
                         continue
 
-                    bids_ult = agrupar_libro_ordenes(bids, paso_ultimo)
-                    asks_ult = agrupar_libro_ordenes(asks, paso_ultimo)
-                    compra_2, vol_c2 = obtener_muro_maximo_volumen({p: v for p, v in bids_ult.items() if p < compra_1})
-                    venta_2, vol_v2 = obtener_muro_maximo_volumen({p: v for p, v in asks_ult.items() if p > venta_1})
+                    bids_ultimo = agrupar_libro_ordenes(bids, paso_ultimo)
+                    asks_ultimo = agrupar_libro_ordenes(asks, paso_ultimo)
+
+                    bids_ult_filtrados = {p: v for p, v in bids_ultimo.items() if p < compra_1}
+                    asks_ult_filtrados = {p: v for p, v in asks_ultimo.items() if p > venta_1}
+
+                    compra_2, vol_c2 = obtener_muro_maximo_volumen(bids_ult_filtrados)
+                    venta_2, vol_v2 = obtener_muro_maximo_volumen(asks_ult_filtrados)
+
+                    hora_actual = time.strftime('%H:%M:%S')
 
                     # ==========================================
-                    # EVALUACIÓN SHORT (Precio sobreextendido arriba -> Buscar Muro Venta N1)
-                    # ==========================================
-                    if venta_1 and venta_1 > precio_actual:
-                        ok_rev, msg_rev = validar_reversion_sma(exchange, symbol, es_long=False, precio_actual=precio_actual)
-                        if ok_rev and venta_2 and venta_2 > venta_1:
-                            distancia_tp = venta_1 - compra_1
-                            distancia_sl = venta_2 - venta_1
-                            if distancia_sl > 0:
-                                ratio = distancia_tp / distancia_sl
-                                if ratio >= MIN_RATIO:
-                                    calc = calcular_entrada(CAPITAL_DISPONIBLE, RIESGO_PCT, venta_1, venta_2, LEVERAGE)
-                                    if calc:
-                                        señales_candidatas.append({
-                                            'symbol': symbol, 'market_info': market_info, 'es_long': False,
-                                            'precio_entrada': venta_1, 'precio_stop': venta_2,
-                                            'ratio': ratio, 'volumen_entrada': vol_v1,
-                                            'pct_movimiento_sl': (distancia_sl / venta_1) * 100, 'calc': calc
-                                        })
-
-                    # ==========================================
-                    # EVALUACIÓN LONG (Precio sobreextendido abajo -> Buscar Muro Compra N1)
+                    # EVALUACIÓN LONG (Reversión Extrema abajo)
                     # ==========================================
                     if compra_1 and compra_1 < precio_actual:
                         ok_rev, msg_rev = validar_reversion_sma(exchange, symbol, es_long=True, precio_actual=precio_actual)
                         if ok_rev and compra_2 and compra_2 < compra_1:
                             distancia_tp = venta_1 - compra_1
                             distancia_sl = compra_1 - compra_2
+                            
                             if distancia_sl > 0:
-                                ratio = distancia_tp / distancia_sl
-                                if ratio >= MIN_RATIO:
+                                ratio_long = distancia_tp / distancia_sl
+                                if ratio_long >= MIN_RATIO:
+                                    pct_tp = (distancia_tp / compra_1) * 100
+                                    pct_sl = (distancia_sl / compra_1) * 100
+                                    base_currency = symbol.split('/')[0]
+                                    
+                                    print(f"\n🟢 [{hora_actual}] ¡ALERTA LONG REVERSIÓN: {symbol}!")
+                                    print(f"   ▸ Reversión SMA: {msg_rev}")
+                                    print(f"   ▸ Vol 24h: {volumen_24h:,.0f} USDT")
+                                    print(f"   ▸ Entrada (Muro N1): {compra_1} USDT | Vol: {vol_c1:,.0f} {base_currency}")
+                                    print(f"   ▸ SL (Muro N2):      {compra_2} USDT (-{round(pct_sl, 2)}%)")
+                                    print(f"   🎯 Ratio R:R: 1:{round(ratio_long, 2)}")
+
                                     calc = calcular_entrada(CAPITAL_DISPONIBLE, RIESGO_PCT, compra_1, compra_2, LEVERAGE)
                                     if calc:
                                         señales_candidatas.append({
-                                            'symbol': symbol, 'market_info': market_info, 'es_long': True,
-                                            'precio_entrada': compra_1, 'precio_stop': compra_2,
-                                            'ratio': ratio, 'volumen_entrada': vol_c1,
-                                            'pct_movimiento_sl': (distancia_sl / compra_1) * 100, 'calc': calc
+                                            'symbol': symbol,
+                                            'market_info': market_info,
+                                            'es_long': True,
+                                            'precio_entrada': compra_1,
+                                            'precio_stop': compra_2,
+                                            'ratio': ratio_long,
+                                            'volumen_entrada': vol_c1,
+                                            'pct_movimiento_sl': pct_sl,
+                                            'calc': calc,
                                         })
+                                    alerta_encontrada = True
+
+                    # ==========================================
+                    # EVALUACIÓN SHORT (Reversión Extrema arriba)
+                    # ==========================================
+                    if venta_1 and venta_1 > precio_actual:
+                        ok_rev, msg_rev = validar_reversion_sma(exchange, symbol, es_long=False, precio_actual=precio_actual)
+                        if ok_rev and venta_2 and venta_2 > venta_1:
+                            distancia_tp = venta_1 - compra_1
+                            distancia_sl = venta_2 - venta_1
+                            
+                            if distancia_sl > 0:
+                                ratio_short = distancia_tp / distancia_sl
+                                if ratio_short >= MIN_RATIO:
+                                    pct_tp_s = (distancia_tp / venta_1) * 100
+                                    pct_sl_s = (distancia_sl_s / venta_1) * 100
+                                    base_currency = symbol.split('/')[0]
+                                    
+                                    print(f"\n🔴 [{hora_actual}] ¡ALERTA SHORT REVERSIÓN: {symbol}!")
+                                    print(f"   ▸ Reversión SMA: {msg_rev}")
+                                    print(f"   ▸ Vol 24h: {volumen_24h:,.0f} USDT")
+                                    print(f"   ▸ Entrada (Muro N1): {venta_1} USDT | Vol: {vol_v1:,.0f} {base_currency}")
+                                    print(f"   ▸ SL (Muro N2):      {venta_2} USDT (+{round(pct_sl_s, 2)}%)")
+                                    print(f"   🎯 Ratio R:R: 1:{round(ratio_short, 2)}")
+
+                                    calc = calcular_entrada(CAPITAL_DISPONIBLE, RIESGO_PCT, venta_1, venta_2, LEVERAGE)
+                                    if calc:
+                                        señales_candidatas.append({
+                                            'symbol': symbol,
+                                            'market_info': market_info,
+                                            'es_long': False,
+                                            'precio_entrada': venta_1,
+                                            'precio_stop': venta_2,
+                                            'ratio': ratio_short,
+                                            'volumen_entrada': vol_v1,
+                                            'pct_movimiento_sl': pct_sl_s,
+                                            'calc': calc,
+                                        })
+                                    alerta_encontrada = True
 
                     time.sleep(PAUSA_ENTRE_PARES_SEG)
+
                 except Exception:
                     continue
 
-            if señales_candidatas:
+            hora_fin = time.strftime('%H:%M:%S')
+            if not alerta_encontrada:
+                print(f"⏳ [{hora_fin}] Ciclo finalizado sin señales en modo reversión extrema (requiere sobreextensión >= {SOBREEXTENSION_MIN_PCT}%).")
+            else:
                 candidatas_ordenadas = ordenar_candidatas_por_score(señales_candidatas)
-                cupo_ok, total_ocupado, long_ocupado, short_ocupado, _ = contar_posiciones_por_lado(exchange)
-                if cupo_ok:
-                    evaluar_y_ejecutar_candidatas(exchange, candidatas_ordenadas, total_ocupado, long_ocupado, short_ocupado)
+                print(f"\n📊 [{hora_fin}] Ciclo finalizado con {len(candidatas_ordenadas)} candidata(s), evaluando por score...")
 
-            time.sleep(10)
+                cupo_verificado, total_ocupado, long_ocupado, short_ocupado, detalle = contar_posiciones_por_lado(exchange)
+                if not cupo_verificado:
+                    print("   ⚠️  No se pudo reverificar el cupo antes de ejecutar; cancelando...")
+                else:
+                    print(f"   🔎 Cupo antes de ejecutar: {total_ocupado}/{MAX_OPERACIONES_ABIERTAS} "
+                          f"(LONG {long_ocupado}, SHORT {short_ocupado}): "
+                          f"{', '.join(detalle) if detalle else 'nada abierto'}")
+                    ejecutadas, total_ocupado, long_ocupado, short_ocupado = evaluar_y_ejecutar_candidatas(
+                        exchange, candidatas_ordenadas, total_ocupado, long_ocupado, short_ocupado)
+                    print(f"   ✅ {ejecutadas} operación(es) ejecutada(s) este ciclo (cupo: {total_ocupado}/{MAX_OPERACIONES_ABIERTAS}).")
+
+            print()
+
         except Exception as e:
-            print(f"⚠️ Error general en ciclo: {e}")
+            hora_err = time.strftime('%H:%M:%S')
+            if isinstance(e, (ccxt.NetworkError, requests.exceptions.RequestException)):
+                print(f"\n📡 [{hora_err}] Error de red ({type(e).__name__}: {e}). Reintentando en {PAUSA_ERROR_RED_SEG}s...")
+            else:
+                print(f"\n❌ [{hora_err}] ERROR INESPERADO ({type(e).__name__}: {e}). Reintentando...")
+                traceback.print_exc()
             time.sleep(PAUSA_ERROR_RED_SEG)
 
 if __name__ == "__main__":
