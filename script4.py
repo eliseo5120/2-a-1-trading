@@ -176,6 +176,29 @@ def resumen_metricas():
 
 
 # ==============================================================================
+# TELEGRAM HELPERS
+# ==============================================================================
+def _tg_api(metodo, payload=None, timeout=15):
+    if not TELEGRAM_BOT_TOKEN:
+        return None
+    try:
+        r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{metodo}",
+                          json=payload or {}, timeout=timeout)
+        return r.json()
+    except Exception:
+        return None
+
+
+def tg_enviar(texto, botones=None):
+    if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
+        return
+    payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': texto, 'parse_mode': 'Markdown'}
+    if botones:
+        payload['reply_markup'] = {'inline_keyboard': botones}
+    _tg_api('sendMessage', payload)
+
+
+# ==============================================================================
 # VALIDACIÓN DE SOBREEXTENSIÓN PARA REVERSIÓN EXTREMA
 # ==============================================================================
 def validar_reversion_sma(exchange, symbol, es_long, precio_actual):
@@ -466,57 +489,13 @@ def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
 PREFIJO_ORDEN = "rev"   
 
 
-AJUSTES_EDITABLES = {
-    'CAPITAL_DISPONIBLE': (float, 1, 1_000_000, "Capital disponible (USDT)"),
-    'RIESGO_PCT': (float, 0.1, 50, "% del capital que se arriesga"),
-    'LEVERAGE': (int, 1, 125, "Apalancamiento"),
-    'MAX_OPERACIONES_ABIERTAS': (int, 1, 20, "Máx operaciones simultáneas"),
-    'ACTIVACION_TRAILING_R': (float, 1.05, 10, "Activación Trailing R"),
-    'SOBREEXTENSION_MIN_PCT': (float, 1.0, 30.0, "% Mínimo distancia SMA"),
-    'MODO_REVERSION_EXTREMA': (bool, None, None, "Modo Reversión (true/false)"),
-    'EJECUTAR_ORDENES_REALES': (bool, None, None, "Órdenes reales (true/false)"),
-}
-
-ALIAS_AJUSTES = {
-    'capital': 'CAPITAL_DISPONIBLE', 'riesgo': 'RIESGO_PCT', 'leverage': 'LEVERAGE',
-    'operaciones': 'MAX_OPERACIONES_ABIERTAS', 'trailing': 'ACTIVACION_TRAILING_R',
-    'sobreextension': 'SOBREEXTENSION_MIN_PCT', 'reversion': 'MODO_REVERSION_EXTREMA',
-}
-
-
-def _convertir_valor(tipo, texto):
-    t = str(texto).strip().replace(',', '.')
-    if tipo is bool:
-        return t.lower() in ('true', '1', 'si', 'sí', 'on', 'activar')
-    numero = float(t)
-    return int(numero) if tipo is int else numero
-
-
-def resolver_nombre_ajuste(texto):
-    k = texto.strip().lower()
-    return ALIAS_AJUSTES.get(k) or next((n for n in AJUSTES_EDITABLES if n.lower() == k), None)
-
-
-def aplicar_ajuste(nombre, valor):
-    globals()[nombre] = tipo = AJUSTES_EDITABLES[nombre][0](valor)
-
-
-def panel_ajustes():
-    return (
-        "⚙️ *MODO REVERSIÓN EXTREMA*\n"
-        f"💰 Capital: {CAPITAL_DISPONIBLE:g} USDT | Riesgo: {RIESGO_PCT:g}%\n"
-        f"🔄 Reversión: {'ON' if MODO_REVERSION_EXTREMA else 'OFF'} | Sobreextensión: {SOBREEXTENSION_MIN_PCT:g}%\n"
-        f"🎯 Trailing: {ACTIVACION_TRAILING_R}R"
-    ), None
-
-
 def _tg_procesar(upd):
     if 'message' in upd:
         m = upd['message']
         if str(m['chat']['id']) == str(TELEGRAM_CHAT_ID):
             texto = m.get('text', '').strip()
             if texto in ('📡 Estado', '/estado'):
-                tg_enviar(f"{panel_ajustes()[0]}\n\n{texto_posiciones()}\n\n{texto_pnl()}")
+                tg_enviar(f"📡 *MODO REVERSIÓN EXTREMA*\nCapital: {CAPITAL_DISPONIBLE:g} USDT")
 
 
 def hilo_telegram():
@@ -537,31 +516,11 @@ def hilo_telegram():
 def calcular_pnl_periodos():
     ahora = datetime.now(TZ_LOCAL)
     hoy0 = ahora.replace(hour=0, minute=0, second=0, microsecond=0)
-    totales = {'diario': 0.0, 'semanal': 0.0, 'mensual': 0.0}
+    totales = {'diario': 0.0}
     for r in obtener_income(int(hoy0.timestamp() * 1000)):
         if r.get('incomeType') in TIPOS_PNL and r.get('asset') == 'USDT':
             totales['diario'] += float(r['income'])
     return totales
-
-
-def texto_pnl():
-    try:
-        p = calcular_pnl_periodos()
-        return f"📊 *PnL Hoy*: {p['diario']:+,.2f} USDT"
-    except Exception:
-        return "📊 PnL no disponible"
-
-
-def _pnl_operacion(id_binance, desde_ms):
-    total = 0.0
-    for r in obtener_income(desde_ms):
-        if r.get('symbol') == id_binance and r.get('incomeType') in TIPOS_PNL and r.get('asset') == 'USDT':
-            total += float(r['income'])
-    return total
-
-
-def texto_posiciones():
-    return "📌 Monitoreando muros de reversión..."
 
 
 def hilo_monitor(exchange):
