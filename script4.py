@@ -113,13 +113,11 @@ def validar_reversion_sma(exchange, symbol, es_long, precio_actual):
         distancia_sma_pct = ((precio_actual - sma_20) / sma_20) * 100
 
         if es_long:
-            # Para LONG: El precio debe estar muy por debajo de la SMA 20 (sobrevendido)
             if distancia_sma_pct <= -SOBREEXTENSION_MIN_PCT:
                 return True, f"LONG Reversión verificado | Precio sobreextendido abajo de SMA20 ({distancia_sma_pct:.2f}%) en {TIMEFRAME_SMA}"
             else:
                 return False, f"LONG rechazado: No suficientemente sobreextendido ({distancia_sma_pct:.2f}% vs req <= -{SOBREEXTENSION_MIN_PCT}%)"
         else:
-            # Para SHORT: El precio debe estar muy por encima de la SMA 20 (sobrecomprado)
             if distancia_sma_pct >= SOBREEXTENSION_MIN_PCT:
                 return True, f"SHORT Reversión verificado | Precio sobreextendido arriba de SMA20 (+{distancia_sma_pct:.2f}%) en {TIMEFRAME_SMA}"
             else:
@@ -322,11 +320,8 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
     except Exception as e:
         cantidad_ok, precio_ok, error = None, None, f"no se pudo validar contra el exchange ({e})"
 
-    print(f"   🤖 Plan de ejecución Reversión: LIMIT {lado_entrada.upper()} {cantidad_ok} {market_info['base']} @ {precio_entrada}")
-    print(f"   🤖 SL (se arma cuando la posición exista): {precio_stop}")
-    print(f"   🤖 Trailing protector → activación {trailing['activation_price']:.8f} "
-          f"| callback {trailing['callback_rate_pct_ajustado']}% "
-          f"(protege ≈ {trailing['protegido_1_1']:.8f})")
+    print(f"   🤖 Plan de ejecución original: LIMIT {lado_entrada.upper()} {cantidad_ok} {market_info['base']} @ {precio_entrada}")
+    print(f"   🤖 SL exacto (Calculadora): {precio_stop}")
 
     if error:
         print(f"   ⏭️  Se omite {symbol}: {error}.\n")
@@ -361,10 +356,9 @@ def ejecutar_operacion(exchange, symbol, market_info, es_long, precio_entrada, p
             'protegido_1_1': trailing['protegido_1_1'],
             'cantidad_str': exchange.amount_to_precision(symbol, cantidad_ok),
         }
-    print(f"   ⏳ SL/Trailing quedaron pendientes: se colocan automáticamente en cuanto la entrada se llene.\n")
+    print(f"   ⏳ SL/Trailing pendientes registrados con precisión exacta.\n")
     tg_enviar(f"📥 ENTRADA ENVIADA: {symbol} {'LONG' if es_long else 'SHORT'}\n"
-              f"LIMIT: {precio_ok} | Cantidad: {cantidad_ok}\n"
-              f"SL/Trailing se arman solos en cuanto se llene la entrada.")
+              f"LIMIT: {precio_ok} | SL: {precio_stop}")
 
     return True
 
@@ -393,29 +387,6 @@ def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
 
     with _lock_proteccion:
         info = PROTECCION_PENDIENTE.get(symbol)
-
-    if not info and simbolo_binance:
-        try:
-            posiciones = exchange.fetch_positions([symbol])
-            for p in posiciones:
-                contratos = float(p.get('contracts') or 0)
-                if contratos != 0:
-                    lado_cierre = 'SELL' if contratos > 0 else 'BUY'
-                    entrada = float(p.get('entryPrice'))
-                    stop_estimado = entrada * 0.98 if contratos > 0 else entrada * 1.02
-                    trailing = calcular_trailing_protector(entrada, stop_estimado)
-                    info = {
-                        'simbolo_binance': simbolo_binance,
-                        'lado_cierre': lado_cierre,
-                        'precio_stop': stop_estimado,
-                        'activation_price': trailing['activation_price'],
-                        'callback_rate': trailing['callback_rate_pct_ajustado'],
-                        'protegido_1_1': trailing['protegido_1_1'],
-                        'cantidad_str': exchange.amount_to_precision(symbol, abs(contratos)),
-                    }
-                    break
-        except Exception as e:
-            print(f"   ⚠️ No se pudo auto-reconstruir información de protección para {symbol}: {e}")
 
     if not info:
         return False
@@ -465,8 +436,7 @@ def colocar_proteccion_pendiente(exchange, symbol, simbolo_binance=None):
 
         tg_enviar(f"🎯 PROTECCIÓN ARMADA: {symbol}\n"
                   f"SL: {info['precio_stop']}\n"
-                  f"Trailing → activación {info['activation_price']:.6f} "
-                  f"(callback {info['callback_rate']}%, protege ≈ {info['protegido_1_1']:.6f})")
+                  f"Trailing activación: {info['activation_price']:.6f}")
         return True
     
     return False
@@ -1275,7 +1245,7 @@ def escanear_perpetuos_binance():
                                 ratio_short = distancia_tp / distancia_sl
                                 if ratio_short >= MIN_RATIO:
                                     pct_tp_s = (distancia_tp / venta_1) * 100
-                                    pct_sl_s = (distancia_sl_s / venta_1) * 100
+                                    pct_sl_s = (distancia_sl / venta_1) * 100
                                     base_currency = symbol.split('/')[0]
                                     
                                     print(f"\n🔴 [{hora_actual}] ¡ALERTA SHORT REVERSIÓN: {symbol}!")
