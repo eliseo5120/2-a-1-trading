@@ -194,13 +194,11 @@ def validar_reversion_sma(exchange, symbol, es_long, precio_actual):
         distancia_sma_pct = ((precio_actual - sma_20) / sma_20) * 100
 
         if es_long:
-            # Para LONG: El precio debe estar muy por debajo de la SMA 20 (sobrevendido)
             if distancia_sma_pct <= -SOBREEXTENSION_MIN_PCT:
                 return True, f"LONG Reversión verificado | Precio sobreextendido abajo de SMA20 ({distancia_sma_pct:.2f}%)"
             else:
                 return False, f"LONG rechazado: No suficientemente sobreextendido ({distancia_sma_pct:.2f}% vs req <= -{SOBREEXTENSION_MIN_PCT}%)"
         else:
-            # Para SHORT: El precio debe estar muy por encima de la SMA 20 (sobrecomprado)
             if distancia_sma_pct >= SOBREEXTENSION_MIN_PCT:
                 return True, f"SHORT Reversión verificado | Precio sobreextendido arriba de SMA20 (+{distancia_sma_pct:.2f}%)"
             else:
@@ -1067,9 +1065,19 @@ def escanear_perpetuos_binance():
     while True:
         try:
             cupo_ok, total_ocupado, long_ocupado, short_ocupado, detalle = contar_posiciones_por_lado(exchange)
-            if not cupo_ok or total_ocupado >= MAX_OPERACIONES_ABIERTAS:
+            if not cupo_ok:
+                print(f"🟡 [{time.strftime('%H:%M:%S' )}] No se pudo verificar el cupo con seguridad. Se espera {SEGUNDOS_ESPERA_CUPO_LLENO:g}s.")
                 time.sleep(SEGUNDOS_ESPERA_CUPO_LLENO)
                 continue
+            if total_ocupado >= MAX_OPERACIONES_ABIERTAS:
+                print(f"🟡 [{time.strftime('%H:%M:%S')}] Cupo lleno ({total_ocupado}/{MAX_OPERACIONES_ABIERTAS}): "
+                      f"{', '.join(detalle) if detalle else 'sin detalle'}. "
+                      f"En espera, gestionando operaciones abiertas... (revisa en {SEGUNDOS_ESPERA_CUPO_LLENO:g}s)")
+                time.sleep(SEGUNDOS_ESPERA_CUPO_LLENO)
+                continue
+            print(f"🟢 [{time.strftime('%H:%M:%S')}] Cupo {total_ocupado}/{MAX_OPERACIONES_ABIERTAS} "
+                  f"(LONG {long_ocupado}, SHORT {short_ocupado}): "
+                  f"{', '.join(detalle) if detalle else 'nada abierto'}. Escaneando modo reversión...")
 
             señales_candidatas = []
             
