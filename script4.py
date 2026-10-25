@@ -27,8 +27,8 @@ PAUSA_ERROR_RED_SEG = 10          # Pausa si se cae la red
 MODO_REVERSION_EXTREMA = True     # True = Caza extremos alejados de la SMA para retroceso en muro
 SMA_CORTA_PERIODO = 20            # Periodo SMA corta
 SMA_LARGA_PERIODO = 200           # Periodo SMA larga
-SOBREEXTENSION_MIN_PCT = 3.5      # % Mínimo de distancia a la SMA 20 para activar reversión
-TIMEFRAME_SMA = '1h'              # Temporalidad para calcular las SMA ('15m', '1h', etc.)
+SOBREEXTENSION_MIN_PCT = 10.0     # % Mínimo de distancia a la SMA 20 para activar reversión
+TIMEFRAME_SMA = '1h'              # Temporalidad para calcular las SMA ('15m', '1h', '4h', etc.)
 VOLUMEN_MINIMO_24H_USDT = 5_000_000  # Volumen mínimo en USDT en 24h para operar un par
 
 # ------------------------------------------------------------------------------
@@ -115,13 +115,13 @@ def validar_reversion_sma(exchange, symbol, es_long, precio_actual):
         if es_long:
             # Para LONG: El precio debe estar muy por debajo de la SMA 20 (sobrevendido)
             if distancia_sma_pct <= -SOBREEXTENSION_MIN_PCT:
-                return True, f"LONG Reversión verificado | Precio sobreextendido abajo de SMA20 ({distancia_sma_pct:.2f}%)"
+                return True, f"LONG Reversión verificado | Precio sobreextendido abajo de SMA20 ({distancia_sma_pct:.2f}%) en {TIMEFRAME_SMA}"
             else:
                 return False, f"LONG rechazado: No suficientemente sobreextendido ({distancia_sma_pct:.2f}% vs req <= -{SOBREEXTENSION_MIN_PCT}%)"
         else:
             # Para SHORT: El precio debe estar muy por encima de la SMA 20 (sobrecomprado)
             if distancia_sma_pct >= SOBREEXTENSION_MIN_PCT:
-                return True, f"SHORT Reversión verificado | Precio sobreextendido arriba de SMA20 (+{distancia_sma_pct:.2f}%)"
+                return True, f"SHORT Reversión verificado | Precio sobreextendido arriba de SMA20 (+{distancia_sma_pct:.2f}%) en {TIMEFRAME_SMA}"
             else:
                 return False, f"SHORT rechazado: No suficientemente sobreextendido ({distancia_sma_pct:.2f}% vs req >= +{SOBREEXTENSION_MIN_PCT}%)"
 
@@ -492,6 +492,7 @@ AJUSTES_EDITABLES = {
     'ACTIVACION_TRAILING_R': (float, 1.05, 10, "Activación del trailing en múltiplos de R"),
     'MINUTOS_MAX_ORDEN_PENDIENTE': (float, 0, 1440, "Minutos antes de cancelar una orden límite sin llenar (0 = nunca)"),
     'SOBREEXTENSION_MIN_PCT': (float, 1.0, 30.0, "% Distancia mínima sobreextensión SMA"),
+    'TIMEFRAME_SMA': (str, None, None, "Temporalidad SMA (ej: 15m, 1h, 4h)"),
     'VOLUMEN_MINIMO_24H_USDT': (float, 0, 1_000_000_000, "Volumen mínimo en 24h (USDT)"),
     'MODO_REVERSION_EXTREMA': (bool, None, None, "Modo reversión extrema (true/false)"),
     'PAUSA_ENTRE_PARES_SEG': (float, 0, 10, "Pausa entre pares (seg)"),
@@ -507,20 +508,23 @@ ALIAS_AJUSTES = {
     'apalancamiento': 'LEVERAGE', 'operaciones': 'MAX_OPERACIONES_ABIERTAS',
     'ratio': 'MIN_RATIO', 'trailing': 'ACTIVACION_TRAILING_R',
     'pendiente': 'MINUTOS_MAX_ORDEN_PENDIENTE', 'sobreextension': 'SOBREEXTENSION_MIN_PCT',
-    'volumen': 'VOLUMEN_MINIMO_24H_USDT', 'reversion': 'MODO_REVERSION_EXTREMA',
-    'ejecutar': 'EJECUTAR_ORDENES_REALES',
+    'timeframe': 'TIMEFRAME_SMA', 'tf': 'TIMEFRAME_SMA', 'volumen': 'VOLUMEN_MINIMO_24H_USDT',
+    'reversion': 'MODO_REVERSION_EXTREMA', 'ejecutar': 'EJECUTAR_ORDENES_REALES',
 }
 
 
 def _convertir_valor(tipo, texto):
-    t = str(texto).strip().replace(',', '.')
+    t = str(texto).strip()
     if tipo is bool:
         if t.lower() in ('true', '1', 'si', 'sí', 'on', 'activar', 'activado'):
             return True
         if t.lower() in ('false', '0', 'no', 'off', 'desactivar', 'desactivado'):
             return False
         raise ValueError("usa true o false")
-    numero = float(t)
+    if tipo is str:
+        return t
+    t_num = t.replace(',', '.')
+    numero = float(t_num)
     if tipo is int:
         if numero != int(numero):
             raise ValueError("debe ser un número entero")
@@ -540,12 +544,16 @@ def resolver_nombre_ajuste(texto):
 
 def aplicar_ajuste(nombre, valor, guardar=True):
     tipo, minimo, maximo, _ = AJUSTES_EDITABLES[nombre]
-    valor = tipo(valor)
-    if tipo is not bool:
-        if minimo is not None and valor < minimo:
-            raise ValueError(f"{nombre} debe estar entre {minimo:g} y {maximo:g}")
-        if maximo is not None and valor > maximo:
-            raise ValueError(f"{nombre} debe estar entre {minimo:g} y {maximo:g}")
+    if tipo is not str:
+        valor = tipo(valor)
+        if tipo is not bool:
+            if minimo is not None and valor < minimo:
+                raise ValueError(f"{nombre} debe estar entre {minimo:g} y {maximo:g}")
+            if maximo is not None and valor > maximo:
+                raise ValueError(f"{nombre} debe estar entre {minimo:g} y {maximo:g}")
+    else:
+        valor = str(valor)
+    
     globals()[nombre] = valor
     if guardar:
         try:
@@ -630,16 +638,17 @@ def panel_ajustes():
         f"📈 Volumen Mínimo 24h: {VOLUMEN_MINIMO_24H_USDT:,.0f} USDT\n"
         f"🔄 Modo Reversión Extrema: {'ACTIVADO' if MODO_REVERSION_EXTREMA else 'DESACTIVADO'}\n"
         f"📐 Sobreextensión Mínima: {SOBREEXTENSION_MIN_PCT:g}%\n"
+        f"⏱️ Temporalidad SMA: {TIMEFRAME_SMA}\n"
         "───────────────────────────────\n"
-        "Toca un botón para cambiar el parámetro e ingresa el nuevo número:"
+        "Toca un botón para cambiar el parámetro:"
     )
     
     botones = [
         [{'text': '💰 Cambiar Capital', 'callback_data': 'pedir|CAPITAL_DISPONIBLE'},
          {'text': '⚠️ Cambiar Riesgo %', 'callback_data': 'pedir|RIESGO_PCT'}],
-        [{'text': '📈 Cambiar Volumen Mín', 'callback_data': 'pedir|VOLUMEN_MINIMO_24H_USDT'},
-         {'text': '📐 Sobreextensión %', 'callback_data': 'pedir|SOBREEXTENSION_MIN_PCT'},
-         {'text': '🔄 Reversión True/False', 'callback_data': 'pedir|MODO_REVERSION_EXTREMA'}],
+        [{'text': '📐 Sobreextensión %', 'callback_data': 'pedir|SOBREEXTENSION_MIN_PCT'},
+         {'text': '⏱️ Temporalidad (tf)', 'callback_data': 'pedir|TIMEFRAME_SMA'}],
+        [{'text': '🔄 Reversión True/False', 'callback_data': 'pedir|MODO_REVERSION_EXTREMA'}],
     ]
     return texto, botones
 
@@ -657,7 +666,7 @@ def _tg_callback(cq):
         _, minimo, maximo, desc = AJUSTES_EDITABLES[var_nombre]
         rango_txt = f"entre {minimo:g} y {maximo:g}" if minimo is not None and maximo is not None else ""
         
-        tg_enviar(f"✍️ Escribe el nuevo número para:\n\n"
+        tg_enviar(f"✍️ Escribe el nuevo valor para:\n\n"
                   f"👉 *{var_nombre}* ({desc})\n"
                   f"Valor actual: {globals()[var_nombre]}\n"
                   f"{f'Rango: {rango_txt}' if rango_txt else ''}")
@@ -716,7 +725,7 @@ def _tg_procesar(upd):
                       f"Capital {CAPITAL_DISPONIBLE:g} USDT | Riesgo {RIESGO_PCT:g}% | Leverage {LEVERAGE}x\n"
                       f"Cupos: {MAX_OPERACIONES_ABIERTAS} operaciones máx | Pendientes: {MINUTOS_MAX_ORDEN_PENDIENTE:g} min\n"
                       f"Volumen Mínimo: {VOLUMEN_MINIMO_24H_USDT:,.0f} USDT\n"
-                      f"Reversión Extrema: {'ON' if MODO_REVERSION_EXTREMA else 'OFF'} ({SOBREEXTENSION_MIN_PCT:g}% dist min)\n\n"
+                      f"Reversión Extrema: {'ON' if MODO_REVERSION_EXTREMA else 'OFF'} (sobreextensión >= {SOBREEXTENSION_MIN_PCT:g}%, tf: {TIMEFRAME_SMA})\n\n"
                       f"{texto_posiciones()}\n\n{texto_pnl()}")
 
 
@@ -945,7 +954,7 @@ def hilo_monitor(exchange):
                 pendientes = _pendientes_del_bot(exchange)
                 if MINUTOS_MAX_ORDEN_PENDIENTE > 0:
                     for o in list(pendientes):
-                        edad_min = (ahora_ms - (o.get('timestamp') or ahora_ms)) / 60000
+                        edad_min = (ahora_ms - (o.get('timestamp'] or ahora_ms)) / 60000
                         if edad_min >= MINUTOS_MAX_ORDEN_PENDIENTE and o['symbol'] not in actuales:
                             exchange.cancel_order(o['id'], o['symbol'])
                             limpiar_ordenes_simbolo(exchange, o['symbol'], exchange.market(o['symbol'])['id'])
@@ -1132,14 +1141,14 @@ def escanear_perpetuos_binance():
         threading.Thread(target=hilo_monitor, args=(exchange,), daemon=True).start()
         modo = "TESTNET" if USAR_TESTNET else "BINANCE REAL"
         tg_enviar(f"🚀 Escáner iniciado ({modo})\n"
-                  f"Modo Reversión Extrema: {'ACTIVADO' if MODO_REVERSION_EXTREMA else 'DESACTIVADO'} (sobreextensión >={SOBREEXTENSION_MIN_PCT}%)\n"
+                  f"Modo Reversión Extrema: {'ACTIVADO' if MODO_REVERSION_EXTREMA else 'DESACTIVADO'} (sobreextensión >={SOBREEXTENSION_MIN_PCT}%, tf: {TIMEFRAME_SMA})\n"
                   f"Volumen mínimo 24h: {VOLUMEN_MINIMO_24H_USDT:,.0f} USDT\n"
                   f"Envío de órdenes: {'ACTIVADO' if EJECUTAR_ORDENES_REALES else 'DESACTIVADO (solo simula)'}")
     else:
         print("ℹ️  TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID no configurados en config.py.")
 
     pares = obtener_solo_perpetuos_usdt(exchange)
-    print(f"🚀 Escáner iniciado | {len(pares)} Perpetuos USDT | Modo Reversión Extrema + Volumen")
+    print(f"🚀 Escáner iniciado | {len(pares)} Perpetuos USDT | Modo Reversión Extrema + Volumen (tf: {TIMEFRAME_SMA})")
     print(f"ℹ️  {platform.system()} | Python {sys.version.split()[0]} | ccxt {ccxt.__version__} | "
           f"{'TESTNET' if USAR_TESTNET else 'BINANCE REAL'} | órdenes reales: {'SÍ' if EJECUTAR_ORDENES_REALES else 'NO'} | "
           f"cupo máx: {MAX_OPERACIONES_ABIERTAS}")
@@ -1162,7 +1171,7 @@ def escanear_perpetuos_binance():
             print(f"🟢 [{time.strftime('%H:%M:%S')}] Cupo {total_ocupado}/{MAX_OPERACIONES_ABIERTAS} "
                   f"(LONG {long_ocupado}, SHORT {short_ocupado}): "
                   f"{', '.join(detalle) if detalle else 'nada abierto'}. "
-                  f"Escaneando modo reversión extrema para llenar {MAX_OPERACIONES_ABIERTAS - total_ocupado} cupo(s)...")
+                  f"Escaneando modo reversión extrema (tf: {TIMEFRAME_SMA}) para llenar {MAX_OPERACIONES_ABIERTAS - total_ocupado} cupo(s)...")
 
             alerta_encontrada = False
             señales_candidatas = []
@@ -1266,7 +1275,7 @@ def escanear_perpetuos_binance():
                                 ratio_short = distancia_tp / distancia_sl
                                 if ratio_short >= MIN_RATIO:
                                     pct_tp_s = (distancia_tp / venta_1) * 100
-                                    pct_sl_s = (distancia_sl_s / venta_1) * 100
+                                    pct_sl_s = (distancia_sl / venta_1) * 100
                                     base_currency = symbol.split('/')[0]
                                     
                                     print(f"\n🔴 [{hora_actual}] ¡ALERTA SHORT REVERSIÓN: {symbol}!")
@@ -1298,7 +1307,7 @@ def escanear_perpetuos_binance():
 
             hora_fin = time.strftime('%H:%M:%S')
             if not alerta_encontrada:
-                print(f"⏳ [{hora_fin}] Ciclo finalizado sin señales en modo reversión extrema (requiere sobreextensión >= {SOBREEXTENSION_MIN_PCT}%).")
+                print(f"⏳ [{hora_fin}] Ciclo finalizado sin señales (requiere sobreextensión >= {SOBREEXTENSION_MIN_PCT}% en {TIMEFRAME_SMA}).")
             else:
                 candidatas_ordenadas = ordenar_candidatas_por_score(señales_candidatas)
                 print(f"\n📊 [{hora_fin}] Ciclo finalizado con {len(candidatas_ordenadas)} candidata(s), evaluando por score...")
