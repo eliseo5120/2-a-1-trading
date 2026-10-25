@@ -954,7 +954,7 @@ def hilo_monitor(exchange):
                 pendientes = _pendientes_del_bot(exchange)
                 if MINUTOS_MAX_ORDEN_PENDIENTE > 0:
                     for o in list(pendientes):
-                        edad_min = (ahora_ms - (o.get('timestamp'] or ahora_ms)) / 60000
+                        edad_min = (ahora_ms - (o.get('timestamp') or ahora_ms)) / 60000
                         if edad_min >= MINUTOS_MAX_ORDEN_PENDIENTE and o['symbol'] not in actuales:
                             exchange.cancel_order(o['id'], o['symbol'])
                             limpiar_ordenes_simbolo(exchange, o['symbol'], exchange.market(o['symbol'])['id'])
@@ -1275,7 +1275,7 @@ def escanear_perpetuos_binance():
                                 ratio_short = distancia_tp / distancia_sl
                                 if ratio_short >= MIN_RATIO:
                                     pct_tp_s = (distancia_tp / venta_1) * 100
-                                    pct_sl_s = (distancia_sl / venta_1) * 100
+                                    pct_sl_s = (distancia_sl_s / venta_1) * 100
                                     base_currency = symbol.split('/')[0]
                                     
                                     print(f"\n🔴 [{hora_actual}] ¡ALERTA SHORT REVERSIÓN: {symbol}!")
